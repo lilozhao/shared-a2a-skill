@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Logs
+logs/
+*.log
+
+# Sensitive files - NEVER commit these
+identity.json
+.env
+.env.*
+*.pem
+*.key
+
+# Temp files
+*.tmp
+*.pid
+.DS_Store
