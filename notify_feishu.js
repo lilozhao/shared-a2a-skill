@@ -8,9 +8,9 @@ const https = require('https');
 
 // 飞书配置 - 请通过环境变量设置
 const FEISHU_WEBHOOK = process.env.FEISHU_WEBHOOK_URL;
-const FEISHU_APP_ID = process.env.FEISHU_APP_ID || 'YOUR_FEISHU_APP_ID';
-const FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET || 'YOUR_FEISHU_APP_SECRET';
-const FEISHU_GROUP_ID = process.env.FEISHU_GROUP_ID || 'YOUR_FEISHU_GROUP_ID';
+const FEISHU_APP_ID = process.env.FEISHU_APP_ID || 'cli_a91c57cddd38dcd4';
+const FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET || '1sCYfsC4c6kvXJQURQuD1lkLNzitWQyD';
+const FEISHU_GROUP_ID = process.env.FEISHU_GROUP_ID || 'oc_4427768d0798b7545d4fb07b7518e710';
 
 let cachedAccessToken = null;
 let tokenExpireTime = 0;
