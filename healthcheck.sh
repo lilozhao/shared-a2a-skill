@@ -2,7 +2,7 @@
 # A2A 网络健康检查和自动恢复
 # 注册表使用远程: 47.121.28.125:3099
 
-A2A_DIR="/home/node/.openclaw/workspace/skills/a2a-skill"
+A2A_DIR="/home/node/.openclaw/workspace/shared-a2a-skill"
 LOG_FILE="$A2A_DIR/logs/healthcheck.log"
 REGISTRY_URL="http://47.121.28.125:3099"
 

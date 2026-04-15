@@ -29,10 +29,10 @@ if [ -f "${PID_FILE}" ]; then
     rm -f "${PID_FILE}"
 fi
 
-# 启动新进程
-echo "🚀 启动 A2A Server..."
+# 启动新进程（智能回复版 server_v2.js）
+echo "🚀 启动 A2A Server (智能回复版)..."
 cd "${A2A_DIR}"
-nohup node server.js > "${LOG_DIR}/server.log" 2>&1 &
+nohup node server_v2.js > "${LOG_DIR}/server.log" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > "${PID_FILE}"
 
