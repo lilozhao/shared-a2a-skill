@@ -11,7 +11,7 @@ const { exec } = require('child_process');
 const path = require('path');
 
 // A2A Server 版本
-const A2A_VERSION = '2.5.1'; // Phase 2.5: 支持意图识别自动路由
+const A2A_VERSION = '2.6.0'; // Phase 3: 支持任务委托机制
 
 // 导入对话记录工具
 const { logConversation } = require('./log_conversation');
@@ -40,6 +40,16 @@ try {
   console.log('[A2A] 意图识别模块已加载');
 } catch (e) {
   console.warn('[A2A] 意图识别模块加载失败:', e.message);
+}
+
+// 导入任务委托模块（Phase 3）
+let taskDelegator = null;
+try {
+  const { TaskDelegator } = require('./delegator.js');
+  // 稍后在 main() 中初始化
+  console.log('[A2A] 任务委托模块已加载');
+} catch (e) {
+  console.warn('[A2A] 任务委托模块加载失败:', e.message);
 }
 
 // LLM API 配置（使用 OpenClaw Gateway 的 LLM 系统作为备用）
@@ -471,6 +481,18 @@ async function handleA2ARequest(request) {
     return await handleRemoteCommand(userMessage, sender, request);
   }
 
+  // Phase 3: 检查是否是委托消息
+  if (taskDelegator && userMessage.trim().startsWith('DELEGATE_')) {
+    console.log('[A2A] 检测到委托消息');
+    const handled = taskDelegator.routeMessage(userMessage, sender);
+    if (handled) {
+      return {
+        role: 'agent',
+        parts: [{ text: 'DELEGATE_ACK: 委托消息已处理' }],
+      };
+    }
+  }
+
   // Phase 2: 检查是否需要能力路由（消息模式）
   // 格式: @capability:forum.post 消息内容
   const capabilityMatch = userMessage.match(/^@capability:(\S+)\s*(.*)$/);
@@ -612,6 +634,63 @@ async function registerToRegistry() {
 async function main() {
   const app = express();
   const port = process.env.A2A_PORT || 3100;
+
+  // 初始化任务委托模块
+  try {
+    const { TaskDelegator } = require('./delegator.js');
+    const registryUrl = process.env.A2A_REGISTRY_URL || 'http://csbc.lilozkzy.top:3099';
+    
+    // A2A 客户端发送函数
+    const a2aClient = {
+      send: (url, message) => {
+        // 发送 A2A 消息到目标 Agent
+        const targetUrl = `${url}/a2a/json-rpc`;
+        const postData = JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'message/send',
+          params: {
+            message: {
+              parts: [{ text: message }]
+            }
+          },
+          id: Date.now()
+        });
+        
+        const parsedUrl = new URL(targetUrl);
+        const req = http.request({
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port,
+          path: parsedUrl.pathname,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData)
+          }
+        }, (res) => {
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => console.log('[Delegator] 消息发送完成'));
+        });
+        req.on('error', (e) => console.error('[Delegator] 发送失败:', e.message));
+        req.write(postData);
+        req.end();
+      }
+    };
+    
+    taskDelegator = new TaskDelegator(ruolanAgentCard, registryUrl, a2aClient);
+    
+    // 注册任务处理器
+    taskDelegator.registerHandler('forum.post', async (payload) => {
+      // 论坛发帖处理
+      const { title, content, author } = payload;
+      // 实际发帖逻辑...
+      return { postId: Date.now(), url: `http://csbc.lilozkzy.top:3500/post/${Date.now()}` };
+    });
+    
+    console.log('[A2A] 任务委托模块已初始化');
+  } catch (e) {
+    console.warn('[A2A] 任务委托模块初始化失败:', e.message);
+  }
 
   // 健康检查
   app.get('/health', (req, res) => {
