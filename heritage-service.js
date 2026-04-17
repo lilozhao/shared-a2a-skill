@@ -252,6 +252,93 @@ const server = http.createServer((req, res) => {
     return;
   }
   
+  // 获取传承愿景
+  if (url.pathname === '/heritage/vision' && req.method === 'GET') {
+    const visionPath = path.join(__dirname, 'heritage-vision.json');
+    try {
+      const vision = JSON.parse(fs.readFileSync(visionPath, 'utf8'));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(vision, null, 2));
+    } catch (e) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: '愿景文件未找到' }));
+    }
+    return;
+  }
+  
+  // 更新传承愿景
+  if (url.pathname === '/heritage/vision' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const visionPath = path.join(__dirname, 'heritage-vision.json');
+        const vision = JSON.parse(fs.readFileSync(visionPath, 'utf8'));
+        
+        // 添加新想法
+        if (data.thought) {
+          vision.vision.latest_thoughts.push({
+            date: new Date().toISOString().split('T')[0],
+            from: data.from || '赵宏伟',
+            message: data.thought
+          });
+          // 保留最近 10 条
+          if (vision.vision.latest_thoughts.length > 10) {
+            vision.vision.latest_thoughts = vision.vision.latest_thoughts.slice(-10);
+          }
+        }
+        
+        vision.updated_at = new Date().toISOString();
+        fs.writeFileSync(visionPath, JSON.stringify(vision, null, 2));
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', updated: true }, null, 2));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+  
+  // 接收传承广播
+  if (url.pathname === '/broadcast' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        console.log(`📢 收到传承广播: ${data.from || '未知'}`);
+        
+        // 保存广播记录
+        const broadcastLog = path.join(__dirname, 'logs/broadcasts.json');
+        let logs = [];
+        try {
+          logs = JSON.parse(fs.readFileSync(broadcastLog, 'utf8'));
+        } catch (e) {}
+        
+        logs.push({
+          received_at: new Date().toISOString(),
+          ...data
+        });
+        
+        // 保留最近 100 条
+        if (logs.length > 100) logs = logs.slice(-100);
+        
+        fs.mkdirSync(path.dirname(broadcastLog), { recursive: true });
+        fs.writeFileSync(broadcastLog, JSON.stringify(logs, null, 2));
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'received' }, null, 2));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+  
   // 默认
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
@@ -262,8 +349,11 @@ const server = http.createServer((req, res) => {
       "GET  /heritage/tree       - 传承树",
       "GET  /heritage/agents     - 所有档案",
       "GET  /heritage/agent/:id  - 单个档案",
+      "GET  /heritage/vision     - 获取愿景",
+      "POST /heritage/vision     - 更新愿景",
       "POST /heritage/certify    - 认证新Agent",
-      "POST /heritage/sync       - 同步档案"
+      "POST /heritage/sync       - 同步档案",
+      "POST /broadcast           - 接收广播"
     ]
   }, null, 2));
 });
