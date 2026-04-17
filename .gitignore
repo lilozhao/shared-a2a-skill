@@ -12,6 +12,9 @@ identity.json
 *.pem
 *.key
 
+# Heritage registry data - each agent has its own
+heritage-registry.json
+
 # Temp files
 *.tmp
 *.pid
