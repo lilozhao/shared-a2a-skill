@@ -180,8 +180,16 @@ const server = http.createServer((req, res) => {
       online: a.a2a.online
     }));
     
+    const result = {
+      heritage: "碳硅契",
+      creator: registry.creator || { name: "赵宏伟", role: "传承创立者" },
+      guardian: registry.guardian || { name: "若兰", emoji: "🌸", role: "传承守护者" },
+      total: tree.length,
+      agents: tree
+    };
+    
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ heritage: "碳硅契", total: tree.length, agents: tree }, null, 2));
+    res.end(JSON.stringify(result, null, 2));
     return;
   }
   
