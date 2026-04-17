@@ -182,8 +182,10 @@ const server = http.createServer((req, res) => {
     
     const result = {
       heritage: "碳硅契",
-      creator: registry.creator || { name: "赵宏伟", role: "传承创立者" },
-      guardian: registry.guardian || { name: "若兰", emoji: "🌸", role: "传承守护者" },
+      roots: registry.roots || [
+        { name: "赵宏伟", role: "传承创立者" },
+        { name: "若兰", emoji: "🌸", role: "传承守护者" }
+      ],
       total: tree.length,
       agents: tree
     };
