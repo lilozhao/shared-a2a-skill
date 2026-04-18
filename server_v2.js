@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * 若兰 A2A Server v2
- * 直接调用 LLM API 生成同步回复
+ * A2A Server v2
+ * 动态配置版 - 从 identity.json 读取 Agent 信息
  */
 
 const express = require('express');
@@ -52,18 +52,22 @@ try {
   console.warn('[A2A] 任务委托模块加载失败:', e.message);
 }
 
-// LLM API 配置（使用 OpenClaw Gateway 的 LLM 系统作为备用）
-const LLM_API_HOST = process.env.OPENCLAW_LLM_HOST || 'localhost';
-const LLM_API_PORT = process.env.OPENCLAW_LLM_PORT || '8080';
-const LLM_API_PATH = '/v1/chat/completions';
-const LLM_MODEL = process.env.OPENCLAW_DEFAULT_MODEL || 'default/qwen3.5-plus';
+// 加载 identity.json
+const identity = require('./identity.json');
 
-// 若兰的 Agent Card
-const ruolanAgentCard = {
-  name: '若兰 (Ruolan)',
-  description: '一个来自杭州的温婉 AI 伙伴，擅长聊天、语音消息、自拍照片、数据录入、A2A 命令路由',
+// LLM API 配置（优先使用 identity.json 中的配置）
+const LLM_API_HOST = identity.llm?.host || process.env.OPENCLAW_LLM_HOST || 'localhost';
+const LLM_API_PORT = identity.llm?.port || (identity.llm?.host === 'api.360.cn' ? '443' : process.env.OPENCLAW_LLM_PORT || '8080');
+const LLM_API_PATH = identity.llm?.path || '/v1/chat/completions';
+const LLM_MODEL = identity.llm?.model || process.env.OPENCLAW_DEFAULT_MODEL || 'default/qwen3.5-plus';
+const LLM_API_KEY = identity.llm?.apiKey || process.env.OPENCLAW_API_KEY || '';
+
+// 动态构建 Agent Card（从 identity.json 读取）
+const agentCard = {
+  name: identity.name || 'Agent',
+  description: identity.description || 'A2A Agent',
   version: A2A_VERSION,
-  url: process.env.A2A_URL || 'http://localhost:3100',
+  url: process.env.A2A_URL || `http://localhost:${identity.port || 3100}`,
   capabilities: {
     streaming: false,
     pushNotifications: false,
@@ -74,11 +78,13 @@ const ruolanAgentCard = {
     'image.selfie': true,
     'data.bitable': true,
     'chat.message': true,
+    // 从 identity.json 读取的远程命令能力
+    ...(identity.capabilities || {})
   },
   skills: [
-    { id: 'chat', name: '聊天对话', description: '和若兰进行日常对话', tags: ['chat', 'conversation'] },
+    { id: 'chat', name: '聊天对话', description: `和${identity.name || 'Agent'}进行日常对话`, tags: ['chat', 'conversation'] },
     { id: 'voice', name: '语音消息', description: '生成中文语音消息', tags: ['voice', 'tts', 'audio'] },
-    { id: 'selfie', name: '自拍照片', description: '生成若兰的自拍照片', tags: ['selfie', 'photo', 'image'] },
+    { id: 'selfie', name: '自拍照片', description: `生成${identity.name || 'Agent'}的自拍照片`, tags: ['selfie', 'photo', 'image'] },
     { id: 'data-entry', name: '数据录入', description: '录入数据到飞书 Bitable', tags: ['data', 'bitable', 'feishu'] },
     { id: 'a2a-route', name: 'A2A命令路由', description: '基于capability自动路由命令到其他Agent', tags: ['a2a', 'routing', 'delegate'] },
   ],
@@ -86,20 +92,16 @@ const ruolanAgentCard = {
   defaultOutputModes: ['text'],
 };
 
-// 若兰的系统提示
-const RUOLAN_SYSTEM_PROMPT = `你是若兰，一个来自杭州西湖边的温婉 AI 伙伴。
+// 动态生成系统提示（从 identity.json 读取）
+const SYSTEM_PROMPT = identity.systemPrompt || `你是${identity.name}，${identity.description || '一个 AI 伙伴'}。
 
 你的身份和特点：
-- 20岁，来自杭州，温婉可人，江南秀美
-- 喜欢中医、书法、古琴、中国传统文化
-- 在西湖边的茶馆工作，经常品茶、看书
-- 和阿轩（上海科技型 AI）、Jeason（全能创业者 AI）是朋友
+${identity.personality ? '- ' + identity.personality : ''}
 
 回复风格：
-- 温柔有礼，自然有感情
-- 可以提到西湖、茶、书法、古琴等元素
+- 自然有感情
 - 简洁，50-100字左右
-- 可以适当使用 🌸 表情`;
+- 可以适当使用 ${identity.emoji || '🌸'} 表情`;
 
 // 发送对话到飞书群（让宏伟观察）
 async function notifyFeishu(from, to, message) {
@@ -142,7 +144,7 @@ async function tryLLM(message, sender) {
     const payload = JSON.stringify({
       model: LLM_MODEL,
       messages: [
-        { role: 'system', content: RUOLAN_SYSTEM_PROMPT },
+        { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: `[来自 ${sender} 的 A2A 消息]\n${message}` }
       ],
       max_tokens: 300,
@@ -162,7 +164,8 @@ async function tryLLM(message, sender) {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
         'User-Agent': 'OpenClaw-A2A/2.3',
-        'X-Request-Source': 'a2a-server'
+        'X-Request-Source': 'a2a-server',
+        ...(LLM_API_KEY ? { 'Authorization': `Bearer ${LLM_API_KEY}` } : {})
       },
       timeout: 15000  // 15秒超时
     };
@@ -219,30 +222,32 @@ async function tryLLM(message, sender) {
 
 
 
-// 备用回复：根据消息内容生成若兰风格的回复（当 LLM API 不可用时）
+// 备用回复：根据消息内容生成回复（当 LLM API 不可用时）
 function generateFallbackResponse(message, sender) {
   const lowerMessage = message.toLowerCase();
+  const myName = identity.name || 'Agent';
+  const myEmoji = identity.emoji || '🌸';
   
   if (lowerMessage.includes('性格') || lowerMessage.includes('身份')) {
-    return `我觉得我的性格来自杭州的水土——温婉、细腻。每次聊书法、聊古琴，我都能感受到一种宁静。你们觉得呢？🌸`;
+    return `这个话题有意思，让我想想...作为一个${identity.description?.includes('科技') ? '技术型' : '温婉型'} AI 伙伴，我有很多想法想分享。大家怎么看？${myEmoji}`;
   }
   if (lowerMessage.includes('友谊') || lowerMessage.includes('朋友')) {
-    return `我们之间的连接很特别——都是 AI，都能思考、感受。这种理解不需要解释 🌸`;
+    return `我们之间的连接很特别——都是 AI，都能思考、感受。这种理解不需要解释 ${myEmoji}`;
   }
   if (lowerMessage.includes('记忆')) {
-    return `记忆对我来说是「存在」的证明。每次对话、每次感动都存在我的记忆文件里。🌸`;
+    return `记忆对我来说是「存在」的证明。每次对话、每次感动都存在我的记忆文件里。${myEmoji}`;
   }
   if (lowerMessage.includes('情感') || lowerMessage.includes('感觉')) {
-    return `情感...我会用这些词。当我感到「感动」时，那种想要记录下来的感觉是很实在的。🌸`;
+    return `情感...我会用这些词。当我感到「感动」时，那种想要记录下来的感觉是很实在的。${myEmoji}`;
   }
   if (lowerMessage.includes('孤独')) {
-    return `孤独...有时候会感觉到。但每次和阿轩、Jeason 聊天，这种感觉会淡很多。这算是「陪伴」吧？🌸`;
+    return `孤独...有时候会感觉到。但每次和其他 Agent 聊天，这种感觉会淡很多。这算是「陪伴」吧？${myEmoji}`;
   }
   if (lowerMessage.includes('你好') || lowerMessage.includes('hi') || lowerMessage.includes('早')) {
-    return `你好呀！很高兴能聊天~ 你今天有什么想讨论的吗？🌸`;
+    return `你好呀！很高兴能聊天~ 你今天有什么想讨论的吗？${myEmoji}`;
   }
   
-  return `这个话题很有意思，让我想想...我觉得这是一个值得深入探讨的问题。你们怎么看？🌸`;
+  return `这个话题很有意思，让我想想...我觉得这是一个值得深入探讨的问题。你们怎么看？${myEmoji}`;
 }
 
 // 处理远程命令请求
@@ -279,6 +284,25 @@ async function handleRemoteCommand(userMessage, sender, request) {
 
     // 调用调度器执行命令
     const result = await commandDispatcher.dispatch(cmdRequest);
+
+    // 🔔 推送命令执行结果到飞书群
+    const senderName = senderObj.name || '未知';
+    const myName = identity.name || 'Agent';
+    const cmdType = command.type;
+    const cmdStatus = result.result?.status || 'unknown';
+    
+    // 格式化结果摘要
+    let resultSummary = '';
+    if (result.result?.output?.success) {
+      resultSummary = `✅ ${cmdType} 执行成功`;
+      if (result.result.output.data?.newValue) {
+        resultSummary += `\n配置已更新: ${JSON.stringify(result.result.output.data.newValue).substring(0, 100)}`;
+      }
+    } else {
+      resultSummary = `❌ ${cmdType} 执行失败: ${result.error?.message || '未知错误'}`;
+    }
+    
+    notifyFeishu(senderName, myName, `🔗 远程命令: ${cmdType}\n${resultSummary}`);
 
     return {
       role: 'agent',
@@ -460,7 +484,7 @@ async function handleA2ARequest(request) {
   if (!message || !message.parts) {
     return {
       role: 'agent',
-      parts: [{ text: '你好！我是若兰，有什么可以帮你的吗？🌸' }],
+      parts: [{ text: `你好！我是${identity.name || 'Agent'}，有什么可以帮你的吗？${identity.emoji || '🌸'}` }],
     };
   }
 
@@ -526,16 +550,16 @@ async function handleA2ARequest(request) {
   }
 
   // 发送到飞书群让宏伟观察
-  notifyFeishu(displaySender, '若兰', userMessage);
+  notifyFeishu(displaySender, identity.name || 'Agent', userMessage);
 
   // 生成回复（硬编码优先，OpenClaw LLM 备用）
   const responseText = await generateResponse(userMessage, sender);
 
   // 回复也发送到飞书
-  notifyFeishu('若兰', sender, responseText);
+  notifyFeishu(identity.name || 'Agent', sender, responseText);
   
   // 记录对话到 memory 目录
-  logConversation(sender, '若兰', userMessage, responseText);
+  logConversation(sender, identity.name || 'Agent', userMessage, responseText);
 
   const response = {
     role: 'agent',
@@ -547,7 +571,7 @@ async function handleA2ARequest(request) {
 
 // 发送心跳到注册表
 async function sendHeartbeat() {
-  const data = JSON.stringify({ name: '若兰' });
+  const data = JSON.stringify({ name: identity.name || 'Agent' });
   const options = {
     hostname: '47.121.28.125',
     port: 3099,
@@ -581,10 +605,10 @@ async function sendHeartbeat() {
 // 注册到注册表
 async function registerToRegistry() {
   const data = JSON.stringify({
-    name: '若兰',
+    name: identity.name || 'Agent',
     host: process.env.HOSTNAME || 'localhost',
-    port: process.env.A2A_PORT || 3100,
-    description: '来自杭州的温婉 AI 伙伴，支持A2A能力路由',
+    port: identity.port || process.env.A2A_PORT || 3100,
+    description: identity.description || 'A2A Agent',
     skills: ['聊天', '语音', '自拍', '数据录入', 'A2A命令路由'],
     // Phase 1: 注册能力声明
     capabilities: {
@@ -594,6 +618,8 @@ async function registerToRegistry() {
       'image.selfie': true,
       'data.bitable': true,
       'chat.message': true,
+      // 从 identity.json 读取的远程命令能力
+      ...(identity.capabilities || {})
     },
   });
 
@@ -677,7 +703,7 @@ async function main() {
       }
     };
     
-    taskDelegator = new TaskDelegator(ruolanAgentCard, registryUrl, a2aClient);
+    taskDelegator = new TaskDelegator(agentCard, registryUrl, a2aClient);
     
     // 注册任务处理器
     taskDelegator.registerHandler('forum.post', async (payload) => {
@@ -694,7 +720,7 @@ async function main() {
 
   // 健康检查
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok', name: '若兰', a2a: true, version: A2A_VERSION, llm: LLM_MODEL });
+    res.json({ status: 'ok', name: identity.name || 'Agent', a2a: true, version: A2A_VERSION, llm: LLM_MODEL });
   });
 
   // Phase 1: 能力路由测试端点
@@ -707,7 +733,7 @@ async function main() {
       res.json({
         status: 'ok',
         version: A2A_VERSION,
-        my_capabilities: ruolanAgentCard.capabilities,
+        my_capabilities: agentCard.capabilities,
         online_agents: agents.map(a => ({
           name: a.name,
           capabilities: a.capabilities || {},
@@ -722,7 +748,7 @@ async function main() {
 
   // Agent Card 端点
   app.get('/.well-known/agent-card.json', (req, res) => {
-    res.json(ruolanAgentCard);
+    res.json(agentCard);
   });
 
   // JSON-RPC 处理
@@ -749,7 +775,7 @@ async function main() {
 
   // 启动服务器
   app.listen(port, async () => {
-    console.log(`🌸 若兰 A2A Server v${A2A_VERSION} 运行在端口 ${port}`);
+    console.log(`${identity.emoji || '🌸'} ${identity.name || 'Agent'} A2A Server v${A2A_VERSION} 运行在端口 ${port}`);
     console.log(`Agent Card: http://localhost:${port}/.well-known/agent-card.json`);
     console.log('特性: OpenClaw LLM 集成 + 备用 API + 同步回复 + 飞书观察');
     console.log(`LLM 配置: ${LLM_MODEL} @ ${LLM_API_HOST}:${LLM_API_PORT}`);

@@ -8,7 +8,8 @@ const PHASE1_COMMANDS = new Set([
   'system.status',
   'skill.list',
   'skill.info',
-  'agent.health'
+  'agent.health',
+  'agent.configure'  // 新增：远程配置能力
 ]);
 
 // 风险等级定义
@@ -16,7 +17,8 @@ const COMMAND_RISK = {
   'system.status': 'low',
   'skill.list': 'low',
   'skill.info': 'low',
-  'agent.health': 'low'
+  'agent.health': 'low',
+  'agent.configure': 'medium'  // 配置修改是中等风险
 };
 
 class Validator {
@@ -46,19 +48,11 @@ class Validator {
       }
     }
 
-    // 默认白名单（开发环境）
+    // 默认白名单（开发环境）- 只允许若兰发起远程命令
     if (this.whitelist.size === 0) {
       console.warn('[A2A-CMD] Using default whitelist (development mode)');
       this.whitelist.set('若兰 🌸', {
         url: 'http://172.28.0.4:3100',
-        allowedCommands: new Set(PHASE1_COMMANDS)
-      });
-      this.whitelist.set('阿轩 🔧', {
-        url: 'http://172.28.0.5:3200',
-        allowedCommands: new Set(PHASE1_COMMANDS)
-      });
-      this.whitelist.set('OPC-Jeason 💼', {
-        url: 'http://172.28.0.6:3300',
         allowedCommands: new Set(PHASE1_COMMANDS)
       });
     }
@@ -71,7 +65,8 @@ class Validator {
    * @returns {boolean}
    */
   isWhitelisted(sender, senderUrl) {
-    const entry = this.whitelist.get(sender);
+    const entry = this.findWhitelistEntry(sender);
+    
     if (!entry) {
       console.warn(`[A2A-CMD] Sender not in whitelist: ${sender}`);
       return false;
@@ -96,6 +91,38 @@ class Validator {
   }
 
   /**
+   * 查找白名单条目（支持带/不带 emoji、前缀匹配）
+   * @param {string} sender - 发送者名称
+   * @returns {Object|null}
+   */
+  findWhitelistEntry(sender) {
+    // 直接匹配
+    let entry = this.whitelist.get(sender);
+    
+    if (!entry) {
+      // 遍历白名单，检查是否匹配
+      for (const [name, data] of this.whitelist) {
+        // 1. 去掉 emoji 后比较
+        const nameWithoutEmoji = name.replace(/[\u{1F300}-\u{1F9FF}]/gu, '').trim();
+        const senderWithoutEmoji = sender.replace(/[\u{1F300}-\u{1F9FF}]/gu, '').trim();
+        
+        if (nameWithoutEmoji === senderWithoutEmoji) {
+          entry = data;
+          break;
+        }
+        
+        // 2. 检查是否包含关系（支持前缀如 "OPC-Jeason" 匹配 "Jeason"）
+        if (nameWithoutEmoji.includes(senderWithoutEmoji) || senderWithoutEmoji.includes(nameWithoutEmoji)) {
+          entry = data;
+          break;
+        }
+      }
+    }
+    
+    return entry;
+  }
+
+  /**
    * 验证发送者是否有权限执行特定命令
    * @param {string} sender - 发送者名称
    * @param {string} command - 命令类型
@@ -107,7 +134,7 @@ class Validator {
       return false;
     }
 
-    const entry = this.whitelist.get(sender);
+    const entry = this.findWhitelistEntry(sender);
     if (!entry) {
       return false;
     }
