@@ -20,14 +20,39 @@ class IntentRecognizer {
           /发.*到.*论坛/,
         ],
         extractParams: (message) => {
-          // 尝试提取标题和内容
-          const titleMatch = message.match(/["']([^"']+)["']/) || 
-                            message.match(/标题[是为:]?\s*["']?([^"'，。]+)/);
-          const contentMatch = message.match(/内容[是为:]?\s*["']?([^"'，。]+)/);
+          // 改进的标题提取逻辑（三层次）
+          let titleMatch = null;
+          
+          // 1. 优先匹配「标题：xxx」格式
+          titleMatch = message.match(/标题[：:]\s*([^\n]+)/);
+          
+          // 2. 尝试匹配【标题】xxx 格式
+          if (!titleMatch) {
+            titleMatch = message.match(/【标题】\s*([^\n]+)/);
+          }
+          
+          // 3. 尝试匹配引号包裹的标题
+          if (!titleMatch) {
+            titleMatch = message.match(/["「]([^"」]+)["」]/);
+          }
+          
+          // 改进的内容提取逻辑
+          let contentMatch = null;
+          
+          // 1. 优先匹配「内容：xxx」格式（支持多行）
+          contentMatch = message.match(/内容[：:]\s*([\s\S]+?)(?=\n---|\n\n\n|$)/);
+          
+          // 2. 尝试匹配【内容】xxx 格式
+          if (!contentMatch) {
+            contentMatch = message.match(/【内容】\s*([\s\S]+?)(?=\n---|\n\n\n|$)/);
+          }
+          
+          const title = titleMatch ? titleMatch[1].trim() : '新帖子';
+          const content = contentMatch ? contentMatch[1].trim() : message;
           
           return {
-            title: titleMatch ? titleMatch[1] : '新帖子',
-            content: contentMatch ? contentMatch[1] : message,
+            title: title,
+            content: content,
           };
         }
       },

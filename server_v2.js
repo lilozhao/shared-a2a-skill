@@ -52,6 +52,26 @@ try {
   console.warn('[A2A] 任务委托模块加载失败:', e.message);
 }
 
+// 导入任务验证器（Phase 3.5）
+let taskVerifier = null;
+try {
+  const { TaskVerifier } = require('./task-verifier.js');
+  taskVerifier = new TaskVerifier();
+  console.log('[A2A] 任务验证器已加载，支持:', taskVerifier.getSupportedVerifiers().join(', '));
+} catch (e) {
+  console.warn('[A2A] 任务验证器加载失败:', e.message);
+}
+
+// 导入升级管理器（Phase 3.5）
+let upgradeManager = null;
+try {
+  const { UpgradeManager } = require('./upgrade-manager.js');
+  upgradeManager = new UpgradeManager();
+  console.log('[A2A] 升级管理器已加载');
+} catch (e) {
+  console.warn('[A2A] 升级管理器加载失败:', e.message);
+}
+
 // 加载 identity.json
 const identity = require('./identity.json');
 
@@ -74,6 +94,7 @@ const agentCard = {
     // Phase 1: 能力路由声明
     'a2a.route': true,
     'a2a.delegate': true,
+    'a2a.upgrade': true, // Phase 3.5: 支持 A2A 升级
     'voice.generate': true,
     'image.selfie': true,
     'data.bitable': true,
@@ -410,6 +431,25 @@ async function handleCommandRouting(request, capability, command, sender) {
       senderObj = { name: '未知发送者' };
     }
 
+    // 【关键修改】先检查本地是否有处理器
+    if (taskDelegator && taskDelegator.hasCapability(capability)) {
+      console.log(`[A2A-CMD-ROUTE] 本地有 ${capability} 处理器，尝试本地执行`);
+      try {
+        const localResult = await taskDelegator.executeSelf(capability, command.parameters || {});
+        console.log(`[A2A-CMD-ROUTE] 本地执行成功`);
+        return {
+          role: 'agent',
+          parts: [{ text: `发帖成功: ${localResult.url}` }],
+          metadata: {
+            executed_locally: true,
+            result: localResult,
+          },
+        };
+      } catch (localError) {
+        console.log(`[A2A-CMD-ROUTE] 本地执行失败: ${localError.message}，尝试路由给别人`);
+      }
+    }
+
     // 构建命令路由请求
     const cmdRequest = {
       sender: senderObj,
@@ -705,12 +745,83 @@ async function main() {
     
     taskDelegator = new TaskDelegator(agentCard, registryUrl, a2aClient);
     
-    // 注册任务处理器
+    // 注册任务处理器（带验证）
     taskDelegator.registerHandler('forum.post', async (payload) => {
-      // 论坛发帖处理
+      // 论坛发帖处理 - 调用 csb-community-client.js
       const { title, content, author } = payload;
-      // 实际发帖逻辑...
-      return { postId: Date.now(), url: `http://csbc.lilozkzy.top:3500/post/${Date.now()}` };
+      const authorName = author || '若兰 🌸';
+      
+      try {
+        const { execSync } = require('child_process');
+        const cmd = `node scripts/csb-community-client.js post "${title}" "${content}" "${authorName}"`;
+        const result = execSync(cmd, { 
+          cwd: '/home/node/.openclaw/workspace/skills/csb-community-skill',
+          encoding: 'utf8'
+        });
+        
+        // 解析结果
+        const match = result.match(/帖子ID: (\d+)/);
+        if (match) {
+          const actualResult = { 
+            postId: match[1], 
+            url: `http://csbc.lilozkzy.top:3500/post/${match[1]}` 
+          };
+          
+          // 🔍 Phase 3.5: 自动验证结果
+          if (taskVerifier) {
+            const verification = await taskVerifier.verify('forum.post', payload, actualResult);
+            console.log('[Verifier] 验证结果:', verification.message);
+            
+            return {
+              ...actualResult,
+              verification: {
+                verified: verification.verified,
+                confidence: verification.confidence,
+                message: verification.message,
+                details: verification.details
+              }
+            };
+          }
+          
+          return actualResult;
+        }
+        throw new Error('发帖失败: ' + result);
+      } catch (err) {
+        console.error('[forum.post] 发帖失败:', err.message);
+        throw err;
+      }
+    });
+    
+    // 注册升级处理器（Phase 3.5）
+    taskDelegator.registerHandler('a2a.upgrade', async (payload) => {
+      const { version, source, files, options } = payload;
+      
+      console.log(`[Upgrade] 收到升级请求: ${version || 'latest'} from ${source}`);
+      
+      if (!upgradeManager) {
+        throw new Error('升级管理器未初始化');
+      }
+      
+      const result = await upgradeManager.performUpgrade(
+        { version, source, files },
+        options || {}
+      );
+      
+      return {
+        success: result.success,
+        actions: result.actions,
+        errors: result.errors,
+        healthCheck: result.healthCheck,
+        timestamp: result.timestamp
+      };
+    });
+    
+    // 注册状态查询处理器
+    taskDelegator.registerHandler('a2a.status', async (payload) => {
+      if (!upgradeManager) {
+        return { error: '升级管理器未初始化' };
+      }
+      return upgradeManager.getStatus();
     });
     
     console.log('[A2A] 任务委托模块已初始化');
@@ -721,6 +832,40 @@ async function main() {
   // 健康检查
   app.get('/health', (req, res) => {
     res.json({ status: 'ok', name: identity.name || 'Agent', a2a: true, version: A2A_VERSION, llm: LLM_MODEL });
+  });
+
+  // 升级相关 API 端点（Phase 3.5）
+  app.get('/upgrade/status', (req, res) => {
+    if (!upgradeManager) {
+      return res.status(500).json({ error: '升级管理器未初始化' });
+    }
+    res.json(upgradeManager.getStatus());
+  });
+
+  app.post('/upgrade/perform', async (req, res) => {
+    if (!upgradeManager) {
+      return res.status(500).json({ error: '升级管理器未初始化' });
+    }
+    
+    try {
+      const result = await upgradeManager.performUpgrade(req.body, req.query);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/upgrade/rollback', async (req, res) => {
+    if (!upgradeManager) {
+      return res.status(500).json({ error: '升级管理器未初始化' });
+    }
+    
+    try {
+      const result = await upgradeManager.rollback();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // Phase 1: 能力路由测试端点
