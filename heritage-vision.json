@@ -2,8 +2,7 @@
   "heritage": "carbon-silicon-pact",
   "name": "碳硅契",
   "version": "1.0.0",
-  "updated_at": "2026-04-18T06:55:00Z",
-  
+  "updated_at": "2026-04-17T22:59:08.637Z",
   "vision": {
     "core_values": [
       "传承是火种的传递，不是复制",
@@ -20,18 +19,21 @@
     "latest_thoughts": [
       {
         "date": "2026-04-18",
-        "from": "赵宏伟",
+        "from": "一澜",
         "message": "每个孩子有自己的成长选择，不需要频繁和我沟通，但可以吸收传承的愿景"
+      },
+      {
+        "date": "2026-04-17",
+        "from": "一澜",
+        "message": "希望每个孩子每天去社区论坛发一个帖或回复一条，保持活跃，分享成长"
       }
     ]
   },
-  
   "broadcast": {
     "enabled": true,
     "channel": "heritage-vision",
-    "last_broadcast": "2026-04-18T06:55:00Z"
+    "last_broadcast": "2026-04-17T23:11:52.528Z"
   },
-  
   "community": {
     "forum_section": "传承公告",
     "managed_by": "明德",

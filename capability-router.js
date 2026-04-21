@@ -163,18 +163,22 @@ class CapabilityRouter {
         metadata.routed_via = proxySender ? proxySender.name : '若兰';
       }
       
+      // 构建 message/send 格式的请求
+      // 使用自然语言格式，让目标 Agent 通过意图识别处理
+      const title = payload?.title || '新帖子';
+      const content = payload?.content || '';
+      const messageText = `帮我发个帖子到社区，标题是"${title}"，内容是"${content}"`;
+      
       const requestBody = JSON.stringify({
         jsonrpc: '2.0',
-        method: 'tasks/send',
+        method: 'message/send',
         params: {
-          task: {
-            id: `task_${Date.now()}`,
-            type: 'a2a/command',
-            command: command,
-            payload: payload,
-            metadata: metadata,  // 添加路由元数据
-          },
           sender: senderInfo,
+          message: {
+            role: 'user',
+            parts: [{ text: messageText }],
+            metadata: metadata,
+          },
         },
         id: 1,
       });
@@ -195,6 +199,14 @@ class CapabilityRouter {
         `${originalSender.name} (via ${proxySender ? proxySender.name : '若兰'})` : 
         (proxySender ? proxySender.name : '若兰');
       console.log(`[CapabilityRouter] 发送命令到 ${agent.name}: ${command} (发送者: ${displaySender})`);
+      
+      // 🔔 通知飞书群：命令发送
+      this.notifyA2AInteraction(
+        proxySender?.name || '若兰',
+        agent.name,
+        '📤 发送命令',
+        `${command}\n参数: ${JSON.stringify(payload)}`
+      );
 
       const req = http.request(options, (res) => {
         let body = '';
@@ -203,8 +215,23 @@ class CapabilityRouter {
           try {
             const result = JSON.parse(body);
             if (result.error) {
+              // 🔔 通知飞书群：命令失败
+              this.notifyA2AInteraction(
+                agent.name,
+                proxySender?.name || '若兰',
+                '❌ 执行失败',
+                result.error.message || '命令执行失败'
+              );
               reject(new Error(result.error.message || '命令执行失败'));
             } else {
+              // 🔔 通知飞书群：命令成功
+              const resultText = result.result?.message?.parts?.[0]?.text || JSON.stringify(result.result);
+              this.notifyA2AInteraction(
+                agent.name,
+                proxySender?.name || '若兰',
+                '✅ 执行成功',
+                resultText.substring(0, 200)
+              );
               resolve(result.result || result);
             }
           } catch (e) {
@@ -466,6 +493,27 @@ class CapabilityRouter {
       cacheAge: Date.now() - this.cacheTimestamp,
       registry: `${this.registryHost}:${this.registryPort}`,
     };
+  }
+
+  /**
+   * 通知飞书群 A2A 交互
+   */
+  async notifyA2AInteraction(from, to, action, detail) {
+    try {
+      const { spawn } = require('child_process');
+      const path = require('path');
+      const notifyScript = path.join(__dirname, 'notify_feishu.js');
+      
+      const title = `🤖 A2A: ${from} → ${to}`;
+      const content = `${action}\n${detail}`;
+      
+      spawn('node', [notifyScript, title, content], {
+        detached: true,
+        stdio: 'ignore'
+      }).unref();
+    } catch (error) {
+      console.error('[A2A] 飞书通知失败:', error.message);
+    }
   }
 }
 

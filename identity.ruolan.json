@@ -18,9 +18,10 @@
     "voice.synthesize": true
   },
   "llm": {
-    "host": "api.360.cn",
-    "path": "/v1/chat/completions",
-    "apiKey": "fk261956401.fRRjHYZ2tDsJ2YWF4wo3izcIutxydByadef599b1",
-    "model": "volcengine/doubao-seed-2-0-lite"
+    "host": "maas-coding-api.cn-huabei-1.xf-yun.com",
+    "path": "/v2/chat/completions",
+    "port": "443",
+    "apiKey": "d969a8a14894cd1b2d2ec024a3217722:NDkxMGZlNmE2MmM0NjlhMTYxZjk4NzNl",
+    "model": "astron-code-latest"
   }
 }

@@ -138,6 +138,186 @@ class FallbackSandbox extends SandboxProvider {
             timestamp: Date.now()
           }
         })
+      `,
+      'agent.configure': `
+        (() => {
+          const fs = require('fs');
+          const path = require('path');
+          
+          const params = ${safeParams};
+          const action = params.action || 'set';
+          const configPath = params.configPath;
+          const value = params.value;
+          
+          // 允许修改的配置项白名单
+          const ALLOWED_CONFIGS = ['capabilities', 'personality', 'llm.model'];
+          
+          if (!ALLOWED_CONFIGS.includes(configPath)) {
+            return { success: false, error: 'Config path not allowed: ' + configPath };
+          }
+          
+          // 读取 identity.json
+          const identityPath = process.env.IDENTITY_PATH || '/home/node/.openclaw/workspace/shared-a2a-skill/identity.json';
+          
+          try {
+            // 备份
+            const backupDir = path.dirname(identityPath) + '/.config-backups';
+            if (!fs.existsSync(backupDir)) {
+              fs.mkdirSync(backupDir, { recursive: true });
+            }
+            
+            let identity = {};
+            if (fs.existsSync(identityPath)) {
+              identity = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
+              // 备份当前配置
+              const backupPath = backupDir + '/identity_' + Date.now() + '.json';
+              fs.writeFileSync(backupPath, JSON.stringify(identity, null, 2));
+            }
+            
+            // 获取旧值
+            const keys = configPath.split('.');
+            let current = identity;
+            for (let i = 0; i < keys.length - 1; i++) {
+              current = current[keys[i]] || {};
+            }
+            const oldValue = current[keys[keys.length - 1]];
+            
+            // 设置新值
+            if (action === 'set') {
+              current[keys[keys.length - 1]] = value;
+            } else if (action === 'merge' && typeof value === 'object') {
+              current[keys[keys.length - 1]] = { ...oldValue, ...value };
+            }
+            
+            // 写回文件
+            fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2));
+            
+            return {
+              success: true,
+              data: {
+                configPath,
+                action,
+                oldValue,
+                newValue: value,
+                needsRestart: true
+              }
+            };
+          } catch (e) {
+            return { success: false, error: 'Config update failed: ' + e.message };
+          }
+        })()
+      `,
+      'agent.restart': `
+        (() => {
+          const { execSync } = require('child_process');
+          const fs = require('fs');
+          
+          try {
+            // 备份当前 PID
+            const pidFile = '/home/node/.openclaw/workspace/shared-a2a-skill/server.pid';
+            let oldPid = null;
+            if (fs.existsSync(pidFile)) {
+              oldPid = fs.readFileSync(pidFile, 'utf8').trim();
+            }
+            
+            // 执行重启脚本
+            const startScript = '/home/node/.openclaw/workspace/shared-a2a-skill/start.sh';
+            execSync('bash ' + startScript, { timeout: 30000 });
+            
+            return {
+              success: true,
+              message: 'A2A service restart initiated',
+              oldPid,
+              note: 'Service is restarting, please check health after 3 seconds'
+            };
+          } catch (e) {
+            return { success: false, error: 'Restart failed: ' + e.message };
+          }
+        })()
+      `,
+      'agent.update': `
+        (() => {
+          const { execSync } = require('child_process');
+          const fs = require('fs');
+          const path = require('path');
+          
+          const params = ${safeParams};
+          const source = params.source || 'github';
+          const branch = params.branch || 'main';
+          
+          try {
+            const a2aDir = '/home/node/.openclaw/workspace/shared-a2a-skill';
+            const logDir = a2aDir + '/logs';
+            const backupDir = logDir + '/update-backups';
+            const timestamp = Date.now();
+            
+            // 创建备份目录
+            if (!fs.existsSync(backupDir)) {
+              fs.mkdirSync(backupDir, { recursive: true });
+            }
+            
+            const backupPath = backupDir + '/update-' + timestamp;
+            
+            // 备份当前版本
+            execSync('cp -r ' + a2aDir + ' ' + backupPath, { timeout: 30000 });
+            
+            // 执行 git pull
+            let pullOutput = '';
+            try {
+              pullOutput = execSync('git pull ' + source + ' ' + branch, {
+                cwd: a2aDir,
+                timeout: 60000,
+                encoding: 'utf8'
+              });
+            } catch (gitError) {
+              return {
+                success: false,
+                error: 'Git pull failed: ' + gitError.message,
+                backupPath: backupPath,
+                canRollback: true
+              };
+            }
+            
+            // 检查是否有更新
+            if (pullOutput.includes('Already up to date')) {
+              return {
+                success: true,
+                message: 'Already up to date, no changes needed',
+                backupPath: backupPath
+              };
+            }
+            
+            // 停止旧服务
+            const pidFile = a2aDir + '/server.pid';
+            if (fs.existsSync(pidFile)) {
+              const oldPid = fs.readFileSync(pidFile, 'utf8').trim();
+              try {
+                execSync('kill ' + oldPid, { timeout: 5000 });
+              } catch (e) {
+                // 忽略停止错误
+              }
+            }
+            
+            // 等待进程停止
+            const sleep = (ms) => { const start = Date.now(); while (Date.now() - start < ms) {} };
+            sleep(2000);
+            
+            // 启动新服务
+            const startScript = a2aDir + '/start.sh';
+            execSync('bash ' + startScript, { timeout: 30000 });
+            
+            return {
+              success: true,
+              message: 'A2A service updated and restarted',
+              backupPath: backupPath,
+              pullOutput: pullOutput.substring(0, 500),
+              updated: true,
+              note: 'Service is restarting, please check health after 3 seconds'
+            };
+          } catch (e) {
+            return { success: false, error: 'Update failed: ' + e.message };
+          }
+        })()
       `
     };
 

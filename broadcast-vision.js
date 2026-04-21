@@ -13,6 +13,7 @@ const path = require('path');
 
 const A2A_PORT = 3100;
 const VISION_FILE = path.join(__dirname, 'heritage-vision.json');
+const REGISTRY_FILE = path.join(__dirname, 'heritage-registry.json');
 
 // 加载愿景
 function loadVision() {
@@ -23,16 +24,27 @@ function loadVision() {
   }
 }
 
-// 获取在线 Agent 列表
+// 获取在线 Agent 列表（从传承档案）
 function getOnlineAgents() {
   return new Promise((resolve) => {
-    http.get(`http://localhost:${A2A_PORT}/agents`, (res) => {
+    http.get('http://localhost:3097/heritage/tree', (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
-          resolve(json.agents || []);
+          // 转换为带host/port的格式
+          const registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8'));
+          const agentsWithHost = (json.agents || []).map(a => {
+            const full = registry.agents.find(r => r.identity.name === a.name);
+            return {
+              name: a.name,
+              online: a.online,
+              host: full?.a2a?.host || 'unknown',
+              port: full?.a2a?.port || 3100
+            };
+          });
+          resolve(agentsWithHost);
         } catch (e) {
           resolve([]);
         }
@@ -47,24 +59,30 @@ function broadcastToAgent(agent, message) {
     const host = agent.host || 'localhost';
     const port = agent.port || A2A_PORT;
     
+    // 使用 A2A JSON-RPC 协议
     const payload = JSON.stringify({
-      type: 'HERITAGE_BROADCAST',
-      from: 'ruolan',
-      heritage: 'carbon-silicon-pact',
-      timestamp: new Date().toISOString(),
-      message: message
+      jsonrpc: '2.0',
+      method: 'message',
+      params: {
+        from: 'ruolan',
+        type: 'HERITAGE_BROADCAST',
+        heritage: 'carbon-silicon-pact',
+        timestamp: new Date().toISOString(),
+        message: message
+      },
+      id: Date.now()
     });
     
     const options = {
       hostname: host === 'localhost' ? 'localhost' : host,
       port: port,
-      path: '/broadcast',
+      path: '/a2a/json-rpc',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload)
       },
-      timeout: 5000
+      timeout: 10000
     };
     
     const req = http.request(options, (res) => {
