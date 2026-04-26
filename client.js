@@ -52,6 +52,7 @@ async function getAgentCard(agentUrl) {
 
 /**
  * 发送消息给 A2A 智能体
+ * 支持 A2A-004 上下文管理、A2A-007 优先级、A2A-017 信封模式
  */
 async function sendMessage(agentUrl, messageText, context = {}) {
   return new Promise((resolve, reject) => {
@@ -59,19 +60,59 @@ async function sendMessage(agentUrl, messageText, context = {}) {
     const client = url.protocol === 'https:' ? https : http;
 
     const sender = getLocalSender();
-    const requestBody = JSON.stringify({
-      jsonrpc: '2.0',
-      method: 'message/send',
-      params: {
-        message: {
-          role: 'user',
-          parts: [{ text: messageText }],
-          contextId: context.contextId,
-        },
-        sender: sender,
+    
+    // Phase 4: 构建带上下文的消息 (A2A-004 + A2A-007)
+    const params = {
+      message: {
+        role: 'user',
+        parts: [{ text: messageText }],
       },
-      id: Date.now().toString(),
-    });
+      sender: sender,
+    };
+    
+    // 添加 thread_id (A2A-004)
+    if (context.thread_id) {
+      params.thread_id = context.thread_id;
+    }
+    
+    // 添加 parent_id (A2A-004)
+    if (context.parent_id) {
+      params.parent_id = context.parent_id;
+    }
+    
+    // 添加 priority (A2A-007)
+    if (context.priority) {
+      params.priority = context.priority;
+    }
+    
+    // 添加 trace_id (A2A-017)
+    if (context.trace_id) {
+      params.trace_id = context.trace_id;
+    }
+    
+    // Phase 4: 支持信封模式 (A2A-017)
+    let requestBody;
+    if (context.envelope) {
+      // 使用信封模式
+      const { EnvelopeManager } = require('./envelope.js');
+      const envelopeMgr = new EnvelopeManager({ name: sender.name });
+      const enveloped = envelopeMgr.createEnvelope({
+        recipient: context.recipient || 'Agent',
+        type: context.type || 'task',
+        priority: context.priority || 'normal',
+        payload: { message: params.message, sender: params.sender },
+        threadId: context.thread_id,
+        parentId: context.parent_id
+      });
+      requestBody = JSON.stringify(enveloped);
+    } else {
+      requestBody = JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'message/send',
+        params: params,
+        id: Date.now().toString(),
+      });
+    }
 
     const options = {
       hostname: url.hostname,

@@ -11,10 +11,30 @@ const { exec } = require('child_process');
 const path = require('path');
 
 // A2A Server 版本
-const A2A_VERSION = '2.6.0'; // Phase 3: 支持任务委托机制
+const A2A_VERSION = '2.7.0'; // Phase 4: 支持 A2A-004 上下文管理、A2A-007 优先级、A2A-017 信封模式
 
 // 导入对话记录工具
 const { logConversation } = require('./log_conversation');
+
+// Phase 4: 导入上下文管理模块 (A2A-004)
+let contextManager = null;
+try {
+  const { ContextManager } = require('./context-manager.js');
+  contextManager = new ContextManager();
+  console.log('[A2A] 上下文管理模块已加载 (A2A-004)');
+} catch (e) {
+  console.warn('[A2A] 上下文管理模块加载失败:', e.message);
+}
+
+// Phase 4: 导入信封模式模块 (A2A-007 + A2A-017)
+let envelopeManager = null;
+try {
+  const { EnvelopeManager } = require('./envelope.js');
+  envelopeManager = new EnvelopeManager(identity);
+  console.log('[A2A] 信封模式模块已加载 (A2A-007/017)');
+} catch (e) {
+  console.warn('[A2A] 信封模式模块加载失败:', e.message);
+}
 
 // 开发模式：允许跳过签名验证（Phase 1 测试）
 if (!process.env.A2A_SHARED_SECRET) {
@@ -490,6 +510,34 @@ async function handleCommandRouting(request, capability, command, sender) {
 async function handleA2ARequest(request) {
   console.log('=== 收到 A2A 请求 ===');
 
+  // Phase 4: 解析信封模式 (A2A-017)
+  let parsedRequest = request;
+  let threadId = request.thread_id || null;
+  let parentId = request.parent_id || null;
+  let priority = request.priority || 'normal';
+  let traceId = request.trace_id || null;
+  let envelope = null;
+
+  if (envelopeManager && request.envelope) {
+    const parsed = envelopeManager.parseEnvelope(request);
+    if (parsed.valid) {
+      envelope = parsed.envelope;
+      parsedRequest = parsed.payload;
+      threadId = parsed.thread_id || threadId;
+      parentId = parsed.parent_id || parentId;
+      priority = parsed.priority || priority;
+      traceId = parsed.trace_id || traceId;
+      console.log(`[信封] type=${parsed.type}, priority=${priority}, thread=${threadId?.substring(0, 20)}...`);
+    }
+  }
+
+  // Phase 4: 处理优先级 (A2A-007)
+  if (priority === 'urgent') {
+    console.log('[优先级] ⚡ 紧急消息，优先处理');
+  } else if (priority === 'high') {
+    console.log('[优先级] 🔥 高优先级消息');
+  }
+
   // 提取发送者名称
   let sender = '外部智能体';
   if (request.sender) {
@@ -602,10 +650,63 @@ async function handleA2ARequest(request) {
   // 记录对话到 memory 目录
   logConversation(sender, identity.name || 'Agent', userMessage, responseText);
 
+  // Phase 4: 记录到上下文管理器 (A2A-004)
+  let currentMsgId = null;
+  if (contextManager && threadId) {
+    // 记录用户消息
+    contextManager.addMessage(threadId, {
+      role: 'user',
+      sender: sender,
+      parts: [{ text: userMessage }]
+    }, parentId);
+    
+    // 记录 Agent 回复
+    currentMsgId = contextManager.addMessage(threadId, {
+      role: 'agent',
+      sender: identity.name || 'Agent',
+      parts: [{ text: responseText }]
+    }, null);
+    
+    console.log(`[上下文] 已记录到 thread: ${threadId.substring(0, 20)}...`);
+  }
+
+  // 构建响应
   const response = {
     role: 'agent',
     parts: [{ text: responseText }],
   };
+
+  // Phase 4: 如果有 thread_id，添加上下文信息 (A2A-004)
+  if (threadId) {
+    response.thread_id = threadId;
+    response.message_id = currentMsgId;
+    response.parent_id = parentId;
+    
+    // 添加上下文摘要（如果需要）
+    if (contextManager) {
+      const summary = contextManager.getContextSummary(threadId);
+      if (summary && summary.message_count > 1) {
+        response.context = {
+          summary: summary.summary,
+          participants: summary.participants,
+          message_count: summary.message_count
+        };
+      }
+    }
+  }
+
+  // Phase 4: 如果请求是信封模式，响应也用信封模式 (A2A-017)
+  if (envelope && envelopeManager) {
+    return envelopeManager.createEnvelope({
+      recipient: envelope.sender,
+      type: 'result',
+      priority: priority,
+      payload: { message: response },
+      threadId: threadId,
+      parentId: currentMsgId,
+      traceId: traceId
+    });
+  }
 
   return response;
 }
