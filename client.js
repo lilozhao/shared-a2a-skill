@@ -132,8 +132,20 @@ async function sendMessage(agentUrl, messageText, context = {}) {
         try {
           const response = JSON.parse(data);
           if (response.error) {
+            // Phase 4: A2A-008 检查是否是 AGENT_OFFLINE 错误
+            if (response.error.code === -32002 || response.error.message?.includes('离线')) {
+              console.log('[A2A] 目标 Agent 离线，尝试暂存消息...');
+              storeOfflineMessage(agentUrl, params, context)
+                .then(() => resolve({ stored: true, message: '消息已暂存，待对方上线后投递' }))
+                .catch(e => reject(new Error('暂存消息失败: ' + e.message)));
+              return;
+            }
             reject(new Error(response.error.message));
           } else {
+            // Phase 4: 检查 ACK 确认
+            if (response.result?.ack) {
+              console.log('[A2A] 消息已确认:', response.result.ack.messageId);
+            }
             resolve(response.result);
           }
         } catch (e) {
@@ -142,7 +154,13 @@ async function sendMessage(agentUrl, messageText, context = {}) {
       });
     });
 
-    req.on('error', reject);
+    req.on('error', (e) => {
+      // Phase 4: A2A-008 连接失败时暂存消息
+      console.log('[A2A] 连接失败，尝试暂存消息...');
+      storeOfflineMessage(agentUrl, params, context)
+        .then(() => resolve({ stored: true, message: '消息已暂存，待对方上线后投递' }))
+        .catch(storeErr => reject(new Error('连接失败且暂存失败: ' + storeErr.message)));
+    });
     req.on('timeout', () => {
       req.destroy();
       reject(new Error('请求超时 (10s)'));
@@ -191,6 +209,62 @@ async function chat(agentUrl, message) {
   return result;
 }
 
+/**
+ * Phase 4: A2A-008 暂存离线消息到注册表
+ */
+async function storeOfflineMessage(agentUrl, params, context) {
+  return new Promise((resolve, reject) => {
+    // 从 agentUrl 提取 recipient
+    const urlParts = agentUrl.match(/http[s]?:\/\/([^:]+):(\d+)/);
+    if (!urlParts) {
+      reject(new Error('无法解析 agentUrl'));
+      return;
+    }
+    
+    const recipient = context.recipient || params.sender?.name || 'Agent';
+    const sender = params.sender?.name || '未知';
+    
+    const data = JSON.stringify({
+      recipient: recipient,
+      sender: sender,
+      message: params
+    });
+    
+    const options = {
+      hostname: '47.121.28.125',
+      port: 3099,
+      path: '/messages/store',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+      },
+    };
+
+    const req = http.request(options, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        try {
+          const result = JSON.parse(body);
+          if (result.success) {
+            console.log(`[离线消息] 已暂存到注册表: ${result.messageId}`);
+            resolve(result);
+          } else {
+            reject(new Error(result.error || '暂存失败'));
+          }
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
 // CLI 使用
 async function main() {
   const args = process.argv.slice(2);
@@ -211,7 +285,7 @@ async function main() {
   }
 }
 
-module.exports = { getAgentCard, sendMessage, chat };
+module.exports = { getAgentCard, sendMessage, chat, storeOfflineMessage };
 
 if (require.main === module) {
   main();

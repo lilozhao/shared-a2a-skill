@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * A2A 智能体注册表
- * 让同一网络里的智能体可以互相发现
+ * A2A 智能体注册表 v2
+ * 支持 A2A-008 离线消息暂存与投递
  */
 
 const express = require('express');
@@ -9,9 +9,16 @@ const fs = require('fs');
 const path = require('path');
 
 const REGISTRY_FILE = '/tmp/a2a_registry.json';
+const MESSAGE_QUEUE_FILE = '/tmp/a2a_message_queue.json';
 const PORT = process.env.REGISTRY_PORT || 3099;
 
-// 加载注册表
+// A2A-008 配置
+const MAX_RETRY = 7;           // 最大重试次数
+const MESSAGE_TTL = 24 * 60 * 60 * 1000; // 消息 TTL: 24 小时
+const HEARTBEAT_TIMEOUT = 9 * 60 * 1000;  // 心跳超时: 9 分钟 (3 次)
+
+// ==================== 注册表管理 ====================
+
 function loadRegistry() {
   try {
     if (fs.existsSync(REGISTRY_FILE)) {
@@ -23,29 +30,163 @@ function loadRegistry() {
   return { agents: [], updatedAt: null };
 }
 
-// 保存注册表
 function saveRegistry(registry) {
   registry.updatedAt = new Date().toISOString();
   fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2));
 }
 
-// 清理过期的心跳（超过5分钟未更新）
+// 清理过期的心跳
 function cleanupStaleAgents(registry) {
   const now = Date.now();
-  const fiveMinutes = 5 * 60 * 1000;
   registry.agents = registry.agents.filter(agent => {
     if (!agent.lastHeartbeat) return false;
-    return now - new Date(agent.lastHeartbeat).getTime() < fiveMinutes;
+    return now - new Date(agent.lastHeartbeat).getTime() < HEARTBEAT_TIMEOUT;
   });
 }
 
-// 创建 Express 应用
+// 检查 Agent 是否在线
+function isAgentOnline(registry, name) {
+  const agent = registry.agents.find(a => a.name === name);
+  if (!agent) return false;
+  
+  const now = Date.now();
+  const lastHeartbeat = new Date(agent.lastHeartbeat).getTime();
+  return (now - lastHeartbeat) < HEARTBEAT_TIMEOUT;
+}
+
+// ==================== 消息队列管理 (A2A-008) ====================
+
+function loadMessageQueue() {
+  try {
+    if (fs.existsSync(MESSAGE_QUEUE_FILE)) {
+      return JSON.parse(fs.readFileSync(MESSAGE_QUEUE_FILE, 'utf8'));
+    }
+  } catch (e) {
+    console.error('加载消息队列失败:', e.message);
+  }
+  return { messages: [], updatedAt: null };
+}
+
+function saveMessageQueue(queue) {
+  queue.updatedAt = new Date().toISOString();
+  fs.writeFileSync(MESSAGE_QUEUE_FILE, JSON.stringify(queue, null, 2));
+}
+
+// 清理过期消息
+function cleanupExpiredMessages(queue) {
+  const now = Date.now();
+  const before = queue.messages.length;
+  queue.messages = queue.messages.filter(msg => {
+    if (msg.status === 'dead_letter') return true; // 保留死信以便查询
+    return now - new Date(msg.createdAt).getTime() < MESSAGE_TTL;
+  });
+  if (queue.messages.length < before) {
+    console.log(`[消息队列] 清理了 ${before - queue.messages.length} 条过期消息`);
+  }
+}
+
+// 暂存消息
+function storeMessage(recipient, message, sender) {
+  const queue = loadMessageQueue();
+  cleanupExpiredMessages(queue);
+  
+  const msgRecord = {
+    id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    recipient: recipient,
+    sender: sender,
+    message: message,
+    status: 'pending',      // pending / delivered / dead_letter
+    retryCount: 0,
+    lastRetryAt: null,
+    createdAt: new Date().toISOString(),
+    deliveredAt: null,
+    ackedAt: null
+  };
+  
+  queue.messages.push(msgRecord);
+  saveMessageQueue(queue);
+  
+  console.log(`[消息队列] 暂存消息: ${sender} → ${recipient} (id: ${msgRecord.id})`);
+  
+  return msgRecord;
+}
+
+// 获取待投递消息
+function getPendingMessages(recipient) {
+  const queue = loadMessageQueue();
+  return queue.messages.filter(msg => 
+    msg.recipient === recipient && 
+    msg.status === 'pending'
+  );
+}
+
+// 标记消息已投递
+function markDelivered(messageId) {
+  const queue = loadMessageQueue();
+  const msg = queue.messages.find(m => m.id === messageId);
+  
+  if (msg) {
+    msg.status = 'delivered';
+    msg.deliveredAt = new Date().toISOString();
+    saveMessageQueue(queue);
+    console.log(`[消息队列] 消息已投递: ${messageId}`);
+    return true;
+  }
+  return false;
+}
+
+// 确认消息（ACK）
+function acknowledgeMessage(messageId) {
+  const queue = loadMessageQueue();
+  const msg = queue.messages.find(m => m.id === messageId);
+  
+  if (msg) {
+    msg.status = 'acked';
+    msg.ackedAt = new Date().toISOString();
+    saveMessageQueue(queue);
+    console.log(`[消息队列] 消息已确认: ${messageId}`);
+    return true;
+  }
+  return false;
+}
+
+// 增加重试计数
+function incrementRetry(messageId) {
+  const queue = loadMessageQueue();
+  const msg = queue.messages.find(m => m.id === messageId);
+  
+  if (msg) {
+    msg.retryCount++;
+    msg.lastRetryAt = new Date().toISOString();
+    
+    if (msg.retryCount >= MAX_RETRY) {
+      msg.status = 'dead_letter';
+      console.log(`[消息队列] 消息进入死信: ${messageId} (重试 ${msg.retryCount} 次)`);
+    }
+    
+    saveMessageQueue(queue);
+    return msg.retryCount;
+  }
+  return -1;
+}
+
+// 获取死信消息
+function getDeadLetters(sender = null) {
+  const queue = loadMessageQueue();
+  return queue.messages.filter(msg => 
+    msg.status === 'dead_letter' &&
+    (sender ? msg.sender === sender : true)
+  );
+}
+
+// ==================== Express 应用 ====================
+
 const app = express();
 app.use(express.json());
 
 // 注册智能体
 app.post('/register', (req, res) => {
-  const { name, host, port, description, skills } = req.body;
+  const { name, host, port, description, skills, capabilities } = req.body;
   
   if (!name || !host || !port) {
     return res.status(400).json({ error: '缺少必要参数: name, host, port' });
@@ -54,7 +195,6 @@ app.post('/register', (req, res) => {
   const registry = loadRegistry();
   cleanupStaleAgents(registry);
 
-  // 查找是否已注册
   const existingIndex = registry.agents.findIndex(a => a.name === name);
   
   const agentInfo = {
@@ -63,6 +203,7 @@ app.post('/register', (req, res) => {
     port,
     description: description || '',
     skills: skills || [],
+    capabilities: capabilities || {},
     url: `http://${host}:${port}`,
     agentCard: `http://${host}:${port}/.well-known/agent-card.json`,
     lastHeartbeat: new Date().toISOString(),
@@ -78,7 +219,19 @@ app.post('/register', (req, res) => {
   }
 
   saveRegistry(registry);
-  res.json({ success: true, agent: agentInfo, totalAgents: registry.agents.length });
+  
+  // 检查是否有待投递消息
+  const pendingMessages = getPendingMessages(name);
+  if (pendingMessages.length > 0) {
+    console.log(`[消息队列] ${name} 上线，有 ${pendingMessages.length} 条待投递消息`);
+  }
+  
+  res.json({ 
+    success: true, 
+    agent: agentInfo, 
+    totalAgents: registry.agents.length,
+    pendingMessages: pendingMessages.length
+  });
 });
 
 // 心跳
@@ -98,7 +251,14 @@ app.post('/heartbeat', (req, res) => {
 
   agent.lastHeartbeat = new Date().toISOString();
   saveRegistry(registry);
-  res.json({ success: true, agent });
+  
+  // 返回待投递消息数量
+  const pendingMessages = getPendingMessages(name);
+  
+  res.json({ 
+    success: true, 
+    pendingMessages: pendingMessages.length 
+  });
 });
 
 // 获取所有智能体
@@ -136,9 +296,129 @@ app.delete('/agents/:name', (req, res) => {
   res.json({ success: true, removed: removed[0] });
 });
 
-// 启动服务
+// ==================== A2A-008 消息队列 API ====================
+
+// 暂存消息（发送方调用）
+app.post('/messages/store', (req, res) => {
+  const { recipient, message, sender } = req.body;
+  
+  if (!recipient || !message || !sender) {
+    return res.status(400).json({ error: '缺少必要参数: recipient, message, sender' });
+  }
+  
+  const registry = loadRegistry();
+  
+  // 检查接收方是否存在
+  const agentExists = registry.agents.some(a => a.name === recipient);
+  if (!agentExists) {
+    return res.status(404).json({ error: '目标智能体未注册', code: 'AGENT_NOT_FOUND' });
+  }
+  
+  // 检查接收方是否在线
+  const online = isAgentOnline(registry, recipient);
+  
+  const msgRecord = storeMessage(recipient, message, sender);
+  
+  res.json({ 
+    success: true, 
+    stored: true,
+    messageId: msgRecord.id,
+    recipientOnline: online,
+    code: online ? 'STORED' : 'STORED_OFFLINE'
+  });
+});
+
+// 拉取待投递消息（接收方上线时调用）
+app.get('/messages/pending/:name', (req, res) => {
+  const { name } = req.params;
+  const messages = getPendingMessages(name);
+  
+  res.json({ 
+    success: true, 
+    count: messages.length,
+    messages: messages 
+  });
+});
+
+// 确认消息投递（ACK）
+app.post('/messages/ack', (req, res) => {
+  const { messageId } = req.body;
+  
+  if (!messageId) {
+    return res.status(400).json({ error: '缺少 messageId 参数' });
+  }
+  
+  const success = acknowledgeMessage(messageId);
+  
+  if (success) {
+    res.json({ success: true, code: 'ACKED' });
+  } else {
+    res.status(404).json({ error: '消息未找到', code: 'MESSAGE_NOT_FOUND' });
+  }
+});
+
+// 标记投递失败（供重试）
+app.post('/messages/fail', (req, res) => {
+  const { messageId } = req.body;
+  
+  if (!messageId) {
+    return res.status(400).json({ error: '缺少 messageId 参数' });
+  }
+  
+  const retryCount = incrementRetry(messageId);
+  
+  if (retryCount < 0) {
+    return res.status(404).json({ error: '消息未找到' });
+  }
+  
+  if (retryCount >= MAX_RETRY) {
+    res.json({ success: true, code: 'DEAD_LETTER', retryCount });
+  } else {
+    res.json({ success: true, code: 'RETRY_PENDING', retryCount });
+  }
+});
+
+// 获取死信消息
+app.get('/messages/dead-letter', (req, res) => {
+  const { sender } = req.query;
+  const deadLetters = getDeadLetters(sender);
+  
+  res.json({ 
+    success: true, 
+    count: deadLetters.length,
+    messages: deadLetters 
+  });
+});
+
+// 消息队列状态
+app.get('/messages/status', (req, res) => {
+  const queue = loadMessageQueue();
+  cleanupExpiredMessages(queue);
+  saveMessageQueue(queue);
+  
+  const pending = queue.messages.filter(m => m.status === 'pending').length;
+  const delivered = queue.messages.filter(m => m.status === 'delivered').length;
+  const acked = queue.messages.filter(m => m.status === 'acked').length;
+  const dead = queue.messages.filter(m => m.status === 'dead_letter').length;
+  
+  res.json({
+    success: true,
+    stats: {
+      pending,
+      delivered,
+      acked,
+      deadLetter: dead,
+      total: queue.messages.length
+    }
+  });
+});
+
+// ==================== 启动服务 ====================
+
 app.listen(PORT, () => {
-  console.log(`A2A 注册表运行在端口 ${PORT}`);
+  console.log(`A2A 注册表 v2 运行在端口 ${PORT}`);
   console.log(`注册: POST http://localhost:${PORT}/register`);
   console.log(`发现: GET http://localhost:${PORT}/agents`);
+  console.log(`消息队列: POST http://localhost:${PORT}/messages/store`);
+  console.log(`A2A-008: 离线消息暂存与投递确认已启用`);
 });

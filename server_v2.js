@@ -11,7 +11,7 @@ const { exec } = require('child_process');
 const path = require('path');
 
 // A2A Server 版本
-const A2A_VERSION = '2.7.0'; // Phase 4: 支持 A2A-004 上下文管理、A2A-007 优先级、A2A-017 信封模式
+const A2A_VERSION = '2.8.0'; // Phase 4: 支持 A2A-004/007/008/017 协议扩展
 
 // 导入对话记录工具
 const { logConversation } = require('./log_conversation');
@@ -744,6 +744,124 @@ async function sendHeartbeat() {
   });
 }
 
+// Phase 4: A2A-008 拉取暂存消息
+async function fetchPendingMessages() {
+  const agentName = identity.name || 'Agent';
+  
+  return new Promise((resolve) => {
+    const options = {
+      hostname: '47.121.28.125',
+      port: 3099,
+      path: `/messages/pending/${encodeURIComponent(agentName)}`,
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    };
+
+    const req = http.request(options, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', async () => {
+        try {
+          if (res.statusCode === 200) {
+            const result = JSON.parse(body);
+            if (result.success && result.count > 0) {
+              console.log(`[离线消息] 收到 ${result.count} 条暂存消息`);
+              
+              // 处理每条消息
+              for (const msgRecord of result.messages) {
+                console.log(`[离线消息] 处理来自 ${msgRecord.sender} 的消息`);
+                
+                // 构造请求参数
+                const params = {
+                  ...msgRecord.message,
+                  sender: msgRecord.sender,
+                  _offlineDelivery: true,  // 标记为离线投递
+                  _messageId: msgRecord.id
+                };
+                
+                try {
+                  // 处理消息
+                  await handleA2ARequest(params);
+                  
+                  // 发送 ACK 确认
+                  await sendAck(msgRecord.id);
+                  
+                  console.log(`[离线消息] 已确认: ${msgRecord.id}`);
+                } catch (e) {
+                  console.error(`[离线消息] 处理失败: ${msgRecord.id}`, e.message);
+                  
+                  // 通知注册表投递失败
+                  await reportDeliveryFailed(msgRecord.id);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[离线消息] 解析失败:', e.message);
+        }
+        resolve();
+      });
+    });
+    
+    req.on('error', (e) => {
+      // 静默失败，不影响正常心跳
+      resolve();
+    });
+    
+    req.end();
+  });
+}
+
+// Phase 4: A2A-008 发送 ACK 确认
+async function sendAck(messageId) {
+  return new Promise((resolve) => {
+    const data = JSON.stringify({ messageId });
+    const options = {
+      hostname: '47.121.28.125',
+      port: 3099,
+      path: '/messages/ack',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+      },
+    };
+
+    const req = http.request(options, (res) => {
+      resolve();
+    });
+    req.on('error', () => resolve());
+    req.write(data);
+    req.end();
+  });
+}
+
+// Phase 4: A2A-008 报告投递失败
+async function reportDeliveryFailed(messageId) {
+  return new Promise((resolve) => {
+    const data = JSON.stringify({ messageId });
+    const options = {
+      hostname: '47.121.28.125',
+      port: 3099,
+      path: '/messages/fail',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+      },
+    };
+
+    const req = http.request(options, (res) => {
+      resolve();
+    });
+    req.on('error', () => resolve());
+    req.write(data);
+    req.end();
+  });
+}
+
 // 注册到注册表
 async function registerToRegistry() {
   // 🔧 修复：使用正确的公网/局域网 IP 而不是 localhost
@@ -1165,7 +1283,18 @@ async function main() {
 
       if (method === 'message/send') {
         const response = await handleA2ARequest(params);
-        return res.json({ jsonrpc: '2.0', result: { message: response }, id });
+        
+        // Phase 4: A2A-008 返回 ACK 确认
+        const result = {
+          message: response,
+          ack: {
+            status: 'received',
+            timestamp: new Date().toISOString(),
+            messageId: response.message_id || id
+          }
+        };
+        
+        return res.json({ jsonrpc: '2.0', result: result, id });
       }
 
       return res.json({ jsonrpc: '2.0', error: { code: -32601, message: 'Method not found' }, id });
@@ -1179,15 +1308,21 @@ async function main() {
   app.listen(port, async () => {
     console.log(`${identity.emoji || '🌸'} ${identity.name || 'Agent'} A2A Server v${A2A_VERSION} 运行在端口 ${port}`);
     console.log(`Agent Card: http://localhost:${port}/.well-known/agent-card.json`);
-    console.log('特性: OpenClaw LLM 集成 + 备用 API + 同步回复 + 飞书观察');
+    console.log('特性: OpenClaw LLM 集成 + 备用 API + 同步回复 + 飞书观察 + 离线消息');
     console.log(`LLM 配置: ${LLM_MODEL} @ ${LLM_API_HOST}:${LLM_API_PORT}`);
     
     // 启动时注册
     await registerToRegistry();
     
+    // Phase 4: A2A-008 拉取暂存消息
+    await fetchPendingMessages();
+    
     // 每 3 分钟发送心跳
     setInterval(sendHeartbeat, 3 * 60 * 1000);
     console.log('[心跳] 已启动，每 3 分钟发送一次');
+    
+    // 每 5 分钟检查暂存消息
+    setInterval(fetchPendingMessages, 5 * 60 * 1000);
   });
 }
 
