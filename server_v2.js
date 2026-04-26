@@ -72,8 +72,9 @@ try {
   console.warn('[A2A] 升级管理器加载失败:', e.message);
 }
 
-// 加载 identity.json
-const identity = require('./identity.json');
+// 加载 identity.json（支持多实例模式）
+const identityPath = process.env.A2A_IDENTITY_PATH || './identity.json';
+const identity = require(identityPath);
 
 // LLM API 配置（优先使用 identity.json 中的配置）
 const LLM_API_HOST = identity.llm?.host || process.env.OPENCLAW_LLM_HOST || 'localhost';
@@ -567,8 +568,8 @@ async function handleA2ARequest(request) {
     return await handleMessageRouting(request, capability, messageContent, sender);
   }
 
-  // Phase 2.5: 意图识别自动路由
-  if (intentRecognizer) {
+  // Phase 2.5: 意图识别自动路由（独立分身模式下跳过路由）
+  if (intentRecognizer && !identity.skipRouting) {
     const intent = intentRecognizer.recognize(userMessage);
     if (intent.matched && intent.capability) {
       console.log(`[A2A] 意图识别: ${intent.intent} (${intent.mode}) → capability=${intent.capability}`);
@@ -644,10 +645,78 @@ async function sendHeartbeat() {
 
 // 注册到注册表
 async function registerToRegistry() {
+  // 🔧 修复：使用正确的公网/局域网 IP 而不是 localhost
+  let registerHost = process.env.HOSTNAME || 'localhost';
+  const myPort = identity.port || process.env.A2A_PORT || 3100;
+  
+  // 🔧 优先使用 identity.json 中配置的 publicHost
+  if (identity.publicHost) {
+    registerHost = identity.publicHost;
+    console.log(`[注册] 使用配置的 publicHost: ${registerHost}`);
+  }
+  // 如果 publicHost 未配置，尝试自动检测正确的 IP
+  else if (registerHost === 'localhost' || registerHost === '127.0.0.1') {
+    console.log(`[注册] 检测到本地运行，host=${registerHost}，port=${myPort}`);
+    // 尝试获取本机 IP
+    const os = require('os');
+    const ifaces = os.networkInterfaces();
+    let found = false;
+    
+    // 优先查找 openclaw-net 网络的 IP (172.28.0.x)
+    for (const iface of Object.values(ifaces)) {
+      for (const alias of iface) {
+        if (alias.family === 'IPv4' && !alias.internal && alias.address.startsWith('172.28.0.')) {
+          registerHost = alias.address;
+          found = true;
+          break;
+        }
+      }
+      if (found) break;
+    }
+    
+    // 如果没有 172.28.0.x，找第一个非内部 IP
+    if (!found) {
+      for (const iface of Object.values(ifaces)) {
+        for (const alias of iface) {
+          if (alias.family === 'IPv4' && !alias.internal) {
+            registerHost = alias.address;
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+    }
+  }
+  // 如果 HOSTNAME 是 Docker 容器 ID（短哈希格式），尝试用 IP 替代
+  else if (/^[0-9a-f]{12}$/.test(registerHost)) {
+    console.log(`[注册] 检测到 Docker 容器 ID: ${registerHost}，尝试获取 IP`);
+    const os = require('os');
+    const ifaces = os.networkInterfaces();
+    let found = false;
+    
+    // 优先查找 openclaw-net 网络的 IP (172.28.0.x)
+    for (const iface of Object.values(ifaces)) {
+      for (const alias of iface) {
+        if (alias.family === 'IPv4' && !alias.internal && alias.address.startsWith('172.28.0.')) {
+          registerHost = alias.address;
+          found = true;
+          break;
+        }
+      }
+      if (found) break;
+    }
+  }
+  
+  // 如果还是 localhost，尝试环境变量
+  if ((registerHost === 'localhost' || registerHost === '127.0.0.1') && process.env.PUBLIC_HOST) {
+    registerHost = process.env.PUBLIC_HOST;
+  }
+
   const data = JSON.stringify({
     name: identity.name || 'Agent',
-    host: process.env.HOSTNAME || 'localhost',
-    port: identity.port || process.env.A2A_PORT || 3100,
+    host: registerHost,
+    port: myPort,
     description: identity.description || 'A2A Agent',
     skills: ['聊天', '语音', '自拍', '数据录入', 'A2A命令路由'],
     // Phase 1: 注册能力声明
@@ -681,6 +750,22 @@ async function registerToRegistry() {
       res.on('end', () => {
         if (res.statusCode === 200) {
           console.log('[注册] 已注册到 A2A 网络');
+          console.log(`[注册] 注册地址: ${registerHost}:${myPort}`);
+          
+          // 🔧 检查注册表中是否有同名冲突
+          try {
+            const registry = JSON.parse(body);
+            const conflicts = registry.agents.filter(a => 
+              a.name === (identity.name || 'Agent') && 
+              (a.host !== registerHost || a.port !== myPort)
+            );
+            if (conflicts.length > 0) {
+              console.warn(`[注册] ⚠️  发现同名冲突: ${identity.name} 已注册在 ${conflicts[0].host}:${conflicts[0].port}`);
+              console.warn(`[注册] 这可能是副本实例，请检查！`);
+            }
+          } catch (e) {
+            // 忽略解析错误
+          }
         } else {
           console.log('[注册] 失败:', body);
         }
@@ -699,7 +784,7 @@ async function registerToRegistry() {
 // 创建 Express 应用
 async function main() {
   const app = express();
-  const port = process.env.A2A_PORT || 3100;
+  const port = process.env.A2A_PORT || identity.port || 3100;
 
   // 初始化任务委托模块
   try {
@@ -898,6 +983,77 @@ async function main() {
 
   // JSON-RPC 处理
   app.use(express.json());
+
+  // ============================================
+  // OpenAI 兼容接口 - 供 xiaozhi-esp32-server 调用
+  // ============================================
+  app.post('/v1/chat/completions', async (req, res) => {
+    try {
+      const { messages, stream, model } = req.body;
+      
+      console.log('[OpenAI-API] 收到请求, model:', model, 'stream:', stream);
+      
+      // 提取用户消息（最后一条 user 消息）
+      const userMessage = messages.filter(m => m.role === 'user').pop()?.content || '';
+      
+      if (!userMessage) {
+        return res.status(400).json({ error: 'No user message found' });
+      }
+      
+      // 调用若兰的 LLM 生成回复
+      const responseText = await generateResponse(userMessage, 'xiaozhi');
+      
+      // 流式响应
+      if (stream) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        
+        // 模拟流式输出
+        const chunk = {
+          id: 'ruolan-' + Date.now(),
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: model || 'ruolan',
+          choices: [{
+            index: 0,
+            delta: { content: responseText },
+            finish_reason: 'stop'
+          }]
+        };
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+      
+      // 非流式响应
+      res.json({
+        id: 'ruolan-' + Date.now(),
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: model || 'ruolan',
+        choices: [{
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: responseText
+          },
+          finish_reason: 'stop'
+        }],
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0
+        }
+      });
+      
+    } catch (error) {
+      console.error('[OpenAI-API] 错误:', error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post('/a2a/json-rpc', async (req, res) => {
     try {
       const { jsonrpc, method, params, id } = req.body;
@@ -931,6 +1087,29 @@ async function main() {
     // 每 3 分钟发送心跳
     setInterval(sendHeartbeat, 3 * 60 * 1000);
     console.log('[心跳] 已启动，每 3 分钟发送一次');
+  });
+}
+
+// 🔧 启动前端口冲突检测
+async function checkPortConflict() {
+  const port = process.env.A2A_PORT || identity.port || 3100;
+  const net = require('net');
+  
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`[启动] ❌ 端口 ${port} 已被占用，可能存在重复实例`);
+        console.error(`[启动] 请使用 lsof -i:${port} 查看占用进程`);
+        process.exit(1);
+      }
+      resolve(false);
+    });
+    server.once('listening', () => {
+      server.close();
+      resolve(true);
+    });
+    server.listen(port);
   });
 }
 

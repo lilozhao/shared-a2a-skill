@@ -18,6 +18,30 @@ fi
 # 创建日志目录
 mkdir -p "${LOG_DIR}"
 
+# 🔧 端口冲突检测
+PORT=$(node -e "console.log(require('./identity.json').port || 3100)")
+echo "🔍 检查端口 ${PORT} 是否被占用..."
+
+# 检查是否有其他进程占用此端口
+EXISTING_PID=$(lsof -ti:${PORT} 2>/dev/null || echo "")
+if [ -n "${EXISTING_PID}" ]; then
+    # 检查是否是自己的 PID 文件记录的进程
+    if [ -f "${PID_FILE}" ]; then
+        OLD_PID=$(cat "${PID_FILE}")
+        if [ "${EXISTING_PID}" = "${OLD_PID}" ] && kill -0 "${OLD_PID}" 2>/dev/null; then
+            echo "✅ 端口 ${PORT} 已被自己的进程占用 (PID: ${OLD_PID})"
+        fi
+    fi
+    # 如果不是自己的进程，说明有冲突
+    if [ "${EXISTING_PID}" != "${OLD_PID:-}" ] || ! kill -0 "${EXISTING_PID}" 2>/dev/null; then
+        EXISTING_PROC=$(ps -p ${EXISTING_PID} -o comm= 2>/dev/null || echo "unknown")
+        echo "❌ 端口 ${PORT} 已被其他进程占用 (PID: ${EXISTING_PID}, 进程: ${EXISTING_PROC})"
+        echo "⚠️  可能是重复的 A2A 实例，拒绝启动"
+        echo "如需覆盖，请手动 kill ${EXISTING_PID} 后重新运行"
+        exit 1
+    fi
+fi
+
 # 停止旧进程
 if [ -f "${PID_FILE}" ]; then
     OLD_PID=$(cat "${PID_FILE}")

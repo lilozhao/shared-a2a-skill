@@ -6,7 +6,27 @@
 
 const http = require('http');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 const { logConversation } = require('./log_conversation');
+
+// 加载本地 identity.json 获取 sender 信息
+function getLocalSender() {
+  try {
+    const identityPath = path.join(__dirname, 'identity.json');
+    if (fs.existsSync(identityPath)) {
+      const identity = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
+      return {
+        name: identity.name || '未知智能体',
+        emoji: identity.emoji || '🤖',
+        url: identity.a2a_url || `http://localhost:${identity.port || 3100}`
+      };
+    }
+  } catch (e) {
+    console.warn('[Client] 加载 identity.json 失败:', e.message);
+  }
+  return { name: '若兰', emoji: '🌸', url: 'http://localhost:3100' };
+}
 
 /**
  * 获取智能体的 Agent Card
@@ -38,6 +58,7 @@ async function sendMessage(agentUrl, messageText, context = {}) {
     const url = new URL('/a2a/json-rpc', agentUrl);
     const client = url.protocol === 'https:' ? https : http;
 
+    const sender = getLocalSender();
     const requestBody = JSON.stringify({
       jsonrpc: '2.0',
       method: 'message/send',
@@ -47,6 +68,7 @@ async function sendMessage(agentUrl, messageText, context = {}) {
           parts: [{ text: messageText }],
           contextId: context.contextId,
         },
+        sender: sender,
       },
       id: Date.now().toString(),
     });
@@ -80,6 +102,11 @@ async function sendMessage(agentUrl, messageText, context = {}) {
     });
 
     req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('请求超时 (10s)'));
+    });
+    req.setTimeout(10000);
     req.write(requestBody);
     req.end();
   });
