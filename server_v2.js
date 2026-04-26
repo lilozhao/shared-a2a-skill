@@ -28,9 +28,10 @@ try {
 
 // Phase 4: 导入信封模式模块 (A2A-007 + A2A-017)
 let envelopeManager = null;
+let EnvelopeManagerClass = null;
 try {
-  const { EnvelopeManager } = require('./envelope.js');
-  envelopeManager = new EnvelopeManager(identity);
+  const module = require('./envelope.js');
+  EnvelopeManagerClass = module.EnvelopeManager;
   console.log('[A2A] 信封模式模块已加载 (A2A-007/017)');
 } catch (e) {
   console.warn('[A2A] 信封模式模块加载失败:', e.message);
@@ -95,6 +96,11 @@ try {
 // 加载 identity.json（支持多实例模式）
 const identityPath = process.env.A2A_IDENTITY_PATH || './identity.json';
 const identity = require(identityPath);
+
+// 初始化信封管理器（需要在 identity 加载后）
+if (EnvelopeManagerClass) {
+  envelopeManager = new EnvelopeManagerClass(identity);
+}
 
 // LLM API 配置（优先使用 identity.json 中的配置）
 const LLM_API_HOST = identity.llm?.host || process.env.OPENCLAW_LLM_HOST || 'localhost';
