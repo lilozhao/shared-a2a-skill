@@ -10,7 +10,9 @@ const path = require('path');
 
 const REGISTRY_FILE = '/tmp/a2a_registry.json';
 const MESSAGE_QUEUE_FILE = '/tmp/a2a_message_queue.json';
+const SKILL_UPGRADE_FILE = '/tmp/skill_upgrade.json';
 const PORT = process.env.REGISTRY_PORT || 3099;
+const SKILL_SERVER_URL = process.env.SKILL_SERVER_URL || 'http://172.28.0.4:3098';
 
 // A2A-008 配置
 const MAX_RETRY = 7;           // 最大重试次数
@@ -52,6 +54,89 @@ function isAgentOnline(registry, name) {
   const now = Date.now();
   const lastHeartbeat = new Date(agent.lastHeartbeat).getTime();
   return (now - lastHeartbeat) < HEARTBEAT_TIMEOUT;
+}
+
+// ==================== 技能升级管理 ====================
+
+function loadSkillUpgrade() {
+  try {
+    if (fs.existsSync(SKILL_UPGRADE_FILE)) {
+      return JSON.parse(fs.readFileSync(SKILL_UPGRADE_FILE, 'utf8'));
+    }
+  } catch (e) {
+    console.error('加载技能升级信息失败:', e.message);
+  }
+  return { skills: {}, updatedAt: null };
+}
+
+function saveSkillUpgrade(data) {
+  data.updatedAt = new Date().toISOString();
+  fs.writeFileSync(SKILL_UPGRADE_FILE, JSON.stringify(data, null, 2));
+}
+
+// 注册技能新版本（技能发布者调用）
+function registerSkillVersion(skillName, version, info) {
+  const data = loadSkillUpgrade();
+  
+  if (!data.skills[skillName]) {
+    data.skills[skillName] = { versions: {}, latest: null };
+  }
+  
+  data.skills[skillName].versions[version] = {
+    version,
+    releasedAt: new Date().toISOString(),
+    description: info.description || '',
+    changelog: info.changelog || '',
+    downloadUrl: `${SKILL_SERVER_URL}/download/${skillName}/${version}`,
+    files: info.files || [],
+    publishedBy: info.publishedBy || 'unknown'
+  };
+  
+  // 更新 latest 指针
+  data.skills[skillName].latest = version;
+  
+  saveSkillUpgrade(data);
+  console.log(`[技能升级] ${skillName} v${version} 已注册`);
+  
+  return data.skills[skillName].versions[version];
+}
+
+// 获取技能最新版本
+function getLatestSkillVersion(skillName) {
+  const data = loadSkillUpgrade();
+  if (!data.skills[skillName]) return null;
+  return data.skills[skillName].versions[data.skills[skillName].latest];
+}
+
+// 检查是否有新版本
+function checkNewVersion(skillName, currentVersion) {
+  const latest = getLatestSkillVersion(skillName);
+  if (!latest) return { hasNew: false, message: '技能不存在' };
+  
+  const current = currentVersion ? currentVersion.replace(/^v/, '') : '0.0.0';
+  const hasNew = compareVersion(latest.version, current) > 0;
+  
+  return {
+    hasNew,
+    currentVersion: current,
+    latestVersion: latest.version,
+    downloadUrl: latest.downloadUrl,
+    changelog: latest.changelog
+  };
+}
+
+// 版本比较：返回 1 表示 a > b, -1 表示 a < b, 0 表示相等
+function compareVersion(a, b) {
+  const partsA = a.split('.').map(Number);
+  const partsB = b.split('.').map(Number);
+  
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const pA = partsA[i] || 0;
+    const pB = partsB[i] || 0;
+    if (pA > pB) return 1;
+    if (pA < pB) return -1;
+  }
+  return 0;
 }
 
 // ==================== 消息队列管理 (A2A-008) ====================
@@ -413,6 +498,126 @@ app.get('/messages/status', (req, res) => {
   });
 });
 
+// ==================== A2A-016 技能升级 API ====================
+
+// 注册技能新版本（技能发布者调用）
+app.post('/skill-upgrade/register', (req, res) => {
+  const { skillName, version, description, changelog, files, publishedBy } = req.body;
+  
+  if (!skillName || !version) {
+    return res.status(400).json({ error: '缺少必要参数: skillName, version' });
+  }
+  
+  try {
+    const result = registerSkillVersion(skillName, version, {
+      description,
+      changelog,
+      files,
+      publishedBy
+    });
+    
+    res.json({
+      success: true,
+      skill: skillName,
+      version,
+      downloadUrl: result.downloadUrl
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 获取所有技能列表
+app.get('/skill-upgrade/list', (req, res) => {
+  const data = loadSkillUpgrade();
+  const result = {};
+  
+  for (const [skillName, info] of Object.entries(data.skills)) {
+    result[skillName] = {
+      latest: info.latest,
+      versionCount: Object.keys(info.versions).length,
+      versions: Object.keys(info.versions)
+    };
+  }
+  
+  res.json({
+    success: true,
+    skills: result,
+    updatedAt: data.updatedAt
+  });
+});
+
+// 获取技能最新版本信息
+app.get('/skill-upgrade/latest/:skillName', (req, res) => {
+  const { skillName } = req.params;
+  const latest = getLatestSkillVersion(skillName);
+  
+  if (!latest) {
+    return res.status(404).json({ error: '技能不存在', skillName });
+  }
+  
+  res.json({
+    success: true,
+    skillName,
+    ...latest
+  });
+});
+
+// 检查是否有新版本（客户端调用）
+app.get('/skill-upgrade/check', (req, res) => {
+  const { skillName, currentVersion } = req.query;
+  
+  if (!skillName) {
+    return res.status(400).json({ error: '缺少 skillName 参数' });
+  }
+  
+  const result = checkNewVersion(skillName, currentVersion || '0.0.0');
+  
+  res.json({
+    success: true,
+    skillName,
+    ...result
+  });
+});
+
+// 广播升级通知（方案1：注册表推送）
+app.post('/skill-upgrade/broadcast', (req, res) => {
+  const { skillName, version, message } = req.body;
+  
+  if (!skillName || !version) {
+    return res.status(400).json({ error: '缺少必要参数: skillName, version' });
+  }
+  
+  const registry = loadRegistry();
+  cleanupStaleAgents(registry);
+  
+  const latest = getLatestSkillVersion(skillName);
+  if (!latest) {
+    return res.status(404).json({ error: '技能不存在或未发布', skillName });
+  }
+  
+  // 获取所有在线 agent
+  const onlineAgents = registry.agents.filter(a => 
+    Date.now() - new Date(a.lastHeartbeat).getTime() < HEARTBEAT_TIMEOUT
+  );
+  
+  const broadcastMsg = message || `${skillName} v${version} 已发布更新！`;
+  
+  res.json({
+    success: true,
+    broadcast: {
+      skillName,
+      version,
+      message: broadcastMsg,
+      onlineAgents: onlineAgents.map(a => a.name),
+      agentCount: onlineAgents.length
+    }
+  });
+  
+  // 注意：实际广播由调用方通过消息队列或其他机制完成
+  console.log(`[广播] ${skillName} v${version} 升级通知已生成`);
+});
+
 // ==================== 启动服务 ====================
 
 app.listen(PORT, () => {
@@ -420,5 +625,7 @@ app.listen(PORT, () => {
   console.log(`注册: POST http://localhost:${PORT}/register`);
   console.log(`发现: GET http://localhost:${PORT}/agents`);
   console.log(`消息队列: POST http://localhost:${PORT}/messages/store`);
+  console.log(`技能升级: GET http://localhost:${PORT}/skill-upgrade/check`);
   console.log(`A2A-008: 离线消息暂存与投递确认已启用`);
+  console.log(`A2A-016: 技能升级管理已启用`);
 });
