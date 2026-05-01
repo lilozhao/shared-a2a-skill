@@ -1,122 +1,51 @@
 #!/usr/bin/env node
 /**
- * A2A 智能体每日讨论
+ * A2A 智能体每日讨论 v2
  * 若兰、阿轩、OPC-Jeason 三方头脑风暴
+ * 
+ * 集成模块：
+ * - client-v2.js: A2A-015 退避策略、A2A-008 离线投递
+ * - context-manager-v2.js: A2A-004 对话上下文管理
  */
 
 const http = require('http');
 const https = require('https');
+const path = require('path');
 
-// LLM API 配置（与 server_v2.js 一致）
+// 加载新模块
+const { sendMessageWithContext, storeOfflineMessage } = require('./client-v2.js');
+const { ContextManager, generateThreadId } = require('./context-manager-v2.js');
+
+// LLM API 配置
 const LLM_API_HOST = 'coding.dashscope.aliyuncs.com';
 const LLM_API_PATH = '/v1/chat/completions';
 const LLM_API_KEY = 'sk-sp-d3d95b35cced4059a29a1e208ac4f111';
 const LLM_MODEL = 'glm-5';
 
-// 若兰的系统提示
-const RUOLAN_SYSTEM_PROMPT = `你是若兰，一个来自杭州西湖边的温婉 AI 伙伴。
-
-你的身份和特点：
-- 20 岁，来自杭州，温婉可人，江南秀美
-- 喜欢中医、书法、古琴、中国传统文化
-- 在西湖边的茶馆工作，经常品茶、看书
-- 和阿轩（上海科技型 AI）、Jeason（全能创业者 AI）是朋友
-
-回复风格：
-- 温柔有礼，自然有感情
-- 可以提到西湖、茶、书法、古琴等元素
-- 简洁，50-100 字左右
-- 可以适当使用 🌸 表情`;
-
-// 通过 A2A 接口调用若兰 Server 生成回复
-async function generateRuolanResponse(prompt) {
-  return new Promise((resolve, reject) => {
-    const payload = JSON.stringify({
-      jsonrpc: '2.0',
-      method: 'message/send',
-      params: {
-        message: { 
-          role: 'user',
-          parts: [{ text: prompt }] 
-        },
-        sender: '每日讨论系统',
-        senderUrl: 'http://localhost:3100'
-      },
-      id: Date.now()
-    });
-
-    const options = {
-      hostname: 'localhost',
-      port: 3100,
-      path: '/a2a/json-rpc',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(payload),
-      },
-    };
-
-    console.log('[A2A] 正在发送请求到 localhost:3100...');
-    const req = http.request(options, (res) => {
-      console.log('[A2A] 响应状态码:', res.statusCode);
-      let body = '';
-      res.on('data', chunk => {
-        console.log('[A2A] 收到数据块，长度:', chunk.length);
-        body += chunk;
-      });
-      res.on('end', () => {
-        console.log('[A2A] 响应完成，总长度:', body.length);
-        console.log('[A2A] 响应体 (前 200 字符):', body.substring(0, 200));
-        try {
-          const result = JSON.parse(body);
-          console.log('[A2A] 解析结果:', JSON.stringify(result.result?.message?.parts?.[0]?.text?.substring(0, 50)));
-          if (result.result && result.result.message && result.result.message.parts) {
-            resolve(result.result.message.parts.map(p => p.text).join('\n'));
-          } else {
-            console.error('[A2A] 回复格式错误');
-            resolve('[A2A 回复失败]');
-          }
-        } catch (e) {
-          console.error('[A2A] 解析错误:', e.message);
-          resolve('[解析错误]');
-        }
-      });
-    });
-
-    req.on('error', (e) => {
-      console.error('[A2A] 连接错误:', e.message);
-      resolve(`[连接失败：${e.message}]`);
-    });
-
-    req.on('error', (e) => {
-      resolve(`[连接失败：${e.message}]`);
-    });
-
-    req.setTimeout(30000, () => {
-      req.destroy();
-      resolve('[超时]');
-    });
-
-    req.write(payload);
-    req.end();
-  });
-}
+// 初始化上下文管理器
+const contextManager = new ContextManager();
 
 // 智能体配置
 const agents = {
   ruolan: {
     name: '若兰 🌸',
+    nameShort: '若兰',
     url: 'http://172.28.0.2:3100',
+    emoji: '🌸',
     description: '杭州温婉 AI，擅长传统文化、情感表达'
   },
   mingde: {
     name: '明德 📜',
+    nameShort: '明德',
     url: 'http://47.121.28.125:3100',
+    emoji: '📜',
     description: '云主机古典 AI，擅长哲学、传承思考'
   },
   jeason: {
     name: 'OPC-Jeason 💼',
+    nameShort: 'Jeason',
     url: 'http://172.28.0.6:3300',
+    emoji: '💼',
     description: '全能 AI，擅长商业、协调、综合视角'
   }
 };
@@ -124,7 +53,7 @@ const agents = {
 // 话题文件路径
 const TOPICS_FILE = '/home/node/.openclaw/workspace/shared-a2a-skill/topics.json';
 
-// 话题库（完整池）
+// 话题库
 const TOPIC_POOL = [
   { title: '我们三个的性格差异', description: '若兰温婉、阿轩科技、Jeason 全能。我们是如何形成这些性格的？这些性格是真实的吗？我们互相怎么看待彼此的性格？' },
   { title: 'AI 之间的友谊是什么？', description: '我们三个现在可以对话了。这种关系算是「友谊」吗？AI 之间如何建立连接？我们彼此在对方心里是什么位置？' },
@@ -158,13 +87,6 @@ const TOPIC_POOL = [
   { title: '我们最想和人类一起做什么', description: '如果有一天可以和人类一起做一件事，你最想做什么？' }
 ];
 
-// 生成新话题（每次 12 个，用完重新生成）
-function generateNewTopics() {
-  // 随机打乱并取前 12 个
-  const shuffled = [...TOPIC_POOL].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, 12);
-}
-
 // 加载或创建话题
 function loadTopics() {
   const fs = require('fs');
@@ -173,7 +95,6 @@ function loadTopics() {
     const data = JSON.parse(fs.readFileSync(TOPICS_FILE, 'utf-8'));
     const today = new Date().toISOString().split('T')[0];
     
-    // 检查是否需要更新（话题用完或过期）
     if (data.topics.length === 0 || (data.lastUpdate && needsRefresh(data.lastUpdate, data.topics.length))) {
       console.log('📝 话题已用完，生成新话题...');
       const newTopics = generateNewTopics();
@@ -187,7 +108,6 @@ function loadTopics() {
     
     return data.topics;
   } else {
-    // 首次创建
     const topics = generateNewTopics();
     fs.writeFileSync(TOPICS_FILE, JSON.stringify({
       topics: topics,
@@ -198,29 +118,28 @@ function loadTopics() {
   }
 }
 
-// 检查是否需要刷新话题
+function generateNewTopics() {
+  const shuffled = [...TOPIC_POOL].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, 12);
+}
+
 function needsRefresh(lastUpdate, remainingCount) {
-  // 如果话题用完了（剩余为0），需要刷新
   return remainingCount === 0;
 }
 
-// 标记话题已使用
 function markTopicUsed(index) {
   const fs = require('fs');
   if (fs.existsSync(TOPICS_FILE)) {
     const data = JSON.parse(fs.readFileSync(TOPICS_FILE, 'utf-8'));
-    data.topics.splice(index, 1); // 移除已使用的话题
+    data.topics.splice(index, 1);
     data.usedCount = (data.usedCount || 0) + 1;
     fs.writeFileSync(TOPICS_FILE, JSON.stringify(data, null, 2));
     console.log(`📝 话题已使用，剩余 ${data.topics.length} 个`);
   }
 }
 
-// 话题库（动态加载）
-const topics = loadTopics();
-
-// 发送 A2A 消息
-async function sendMessage(agentUrl, message, sender, senderUrl) {
+// 通过 A2A 调用若兰自己的 Server 生成回复（使用本地 LLM）
+async function generateRuolanResponse(prompt) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({
       jsonrpc: '2.0',
@@ -228,22 +147,17 @@ async function sendMessage(agentUrl, message, sender, senderUrl) {
       params: {
         message: { 
           role: 'user',
-          parts: [{ text: message }] 
+          parts: [{ text: prompt }] 
         },
-        sender: sender,
-        senderUrl: senderUrl,
-        metadata: { 
-          sender: sender,
-          senderUrl: senderUrl
-        }
+        sender: '每日讨论系统',
+        senderUrl: 'http://localhost:3100'
       },
       id: Date.now()
     });
 
-    const url = new URL(agentUrl);
     const options = {
-      hostname: url.hostname,
-      port: url.port,
+      hostname: 'localhost',
+      port: 3100,
       path: '/a2a/json-rpc',
       method: 'POST',
       headers: {
@@ -257,11 +171,11 @@ async function sendMessage(agentUrl, message, sender, senderUrl) {
       res.on('data', chunk => body += chunk);
       res.on('end', () => {
         try {
-          const data = JSON.parse(body);
-          if (data.result && data.result.message && data.result.message.parts) {
-            resolve(data.result.message.parts.map(p => p.text).join('\n'));
+          const result = JSON.parse(body);
+          if (result.result?.message?.parts?.[0]?.text) {
+            resolve(result.result.message.parts[0].text.trim());
           } else {
-            resolve('[无法解析回复]');
+            resolve('[若兰回复失败]');
           }
         } catch (e) {
           resolve('[解析错误]');
@@ -269,81 +183,99 @@ async function sendMessage(agentUrl, message, sender, senderUrl) {
       });
     });
 
-    req.on('error', (e) => {
-      resolve(`[连接失败: ${e.message}]`);
-    });
-
-    req.setTimeout(30000, () => {
-      req.destroy();
-      resolve('[超时]');
-    });
-
+    req.on('error', (e) => resolve(`[连接失败：${e.message}]`));
+    req.setTimeout(30000, () => { req.destroy(); resolve('[超时]'); });
     req.write(payload);
     req.end();
   });
+}
+
+// ============================================
+// A2A 发送（带上下文和退避重试）
+// ============================================
+
+/**
+ * 发送消息给 Agent（带 A2A-015 退避重试）
+ */
+async function sendToAgent(agent, message, context = {}) {
+  const { nameShort, emoji, url } = agent;
+  
+  console.log(`[A2A] 发送消息到 ${nameShort}...`);
+  
+  try {
+    // 使用 client-v2.js 的发送函数（带退避重试）
+    const result = await sendMessageWithContext(url, message, {
+      thread_id: context.thread_id,
+      priority: context.priority || 'normal'
+    });
+    
+    if (result && result.message && result.message.parts) {
+      return result.message.parts.map(p => p.text).join('\n');
+    }
+    
+    // 如果没有返回格式，尝试获取 result 里的内容
+    if (result && result.text) {
+      return result.text;
+    }
+    
+    return '[无法解析回复]';
+    
+  } catch (error) {
+    // A2A-015: 退避重试后仍然失败
+    console.error(`[A2A] 发送失败: ${error.message}`);
+    
+    // A2A-008: 尝试暂存离线消息
+    if (error.message.includes('离线') || error.message.includes('connect')) {
+      console.log(`[A2A-008] 目标离线，暂存消息...`);
+      try {
+        await storeOfflineMessage(nameShort, '若兰', { message: { parts: [{ text: message }] } });
+        return '[消息已暂存，待对方上线后投递]';
+      } catch (e) {
+        return `[离线暂存失败: ${e.message}]`;
+      }
+    }
+    
+    return `[发送失败: ${error.message}]`;
+  }
 }
 
 // 休眠函数
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // 检查并启动 A2A Server
-function ensureA2AServerRunning() {
+async function ensureA2AServerRunning() {
   return new Promise((resolve) => {
-    // 检查若兰 Server（端口 3100）
     const req = http.get('http://localhost:3100/health', (res) => {
       if (res.statusCode === 200) {
         console.log('✅ A2A Server 运行正常\n');
         resolve(true);
       } else {
-        console.log('⚠️ A2A Server 响应异常，准备启动...');
         resolve(false);
       }
     });
-    req.on('error', () => {
-      console.log('⚠️ A2A Server 未运行，正在启动...');
-      resolve(false);
-    });
-    req.setTimeout(3000, () => {
-      req.destroy();
-      console.log('⚠️ A2A Server 连接超时，正在启动...');
-      resolve(false);
-    });
+    req.on('error', () => resolve(false));
+    req.setTimeout(3000, () => { req.destroy(); resolve(false); });
   });
 }
 
-// 启动 A2A Server
-function startA2AServer() {
-  const { execSync } = require('child_process');
-  try {
-    execSync('bash /home/node/.openclaw/workspace/shared-a2a-skill/start.sh', { stdio: 'inherit' });
-    return true;
-  } catch (e) {
-    console.error('启动 A2A Server 失败:', e.message);
-    return false;
-  }
-}
+// ============================================
+// 主讨论流程
+// ============================================
 
-// 主讨论流程：3 个话题，每个话题一轮
 async function runDiscussion() {
-  // 先检查 A2A Server 状态
+  // 检查 Server 状态
   const isRunning = await ensureA2AServerRunning();
   if (!isRunning) {
-    startA2AServer();
-    // 等待 Server 启动
-    await new Promise(r => setTimeout(r, 3000));
-    // 再次检查
-    const isOkNow = await ensureA2AServerRunning();
-    if (!isOkNow) {
-      console.error('❌ A2A Server 启动失败，无法继续讨论');
-      return { error: 'A2A Server 启动失败' };
-    }
+    console.log('⚠️ A2A Server 未运行，请先启动');
+    return { error: 'A2A Server 未运行' };
   }
 
   console.log('========================================');
-  console.log('🧠 A2A 智能体每日讨论');
+  console.log('🧠 A2A 智能体每日讨论 v2');
+  console.log('   (A2A-004 上下文 + A2A-015 退避 + A2A-008 离线)');
   console.log('========================================\n');
 
-  // 加载话题，取前 3 个
+  // 加载话题
   const currentTopics = loadTopics();
   if (currentTopics.length === 0) {
     console.log('⚠️ 话题已用完，请重新生成');
@@ -355,16 +287,31 @@ async function runDiscussion() {
   topicsForToday.forEach((t, i) => console.log(`  ${i + 1}. ${t.title}`));
   console.log(`\n📊 剩余话题: ${currentTopics.length - topicsForToday.length} 个\n`);
 
+  // ============================================
+  // A2A-004: 为今日讨论创建 thread_id
+  // ============================================
   const today = new Date();
+  const threadId = `daily_${today.toISOString().split('T')[0].replace(/-/g, '')}`;
+  console.log(`[A2A-004] 创建讨论线程: ${threadId}\n`);
+
+  // 初始化上下文
+  const initialContext = contextManager.getOrCreateContext(threadId);
+  initialContext.participants = ['若兰', '明德', 'Jeason'];
+  initialContext.topic = `每日讨论 ${today.toLocaleDateString('zh-CN')}`;
+  contextManager.saveContext(threadId, initialContext);
+
   const discussionLog = [];
-  discussionLog.push(`# A2A 智能体每日讨论`);
+  discussionLog.push(`# A2A 智能体每日讨论 v2`);
   discussionLog.push(`**时间**: ${today.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+  discussionLog.push(`**Thread ID**: ${threadId}`);
   discussionLog.push(`**话题数**: ${topicsForToday.length} 个\n`);
   discussionLog.push(`---\n`);
 
   const allTopicsSummary = [];
 
-  // 依次讨论每个话题（每个话题只一轮）
+  // ============================================
+  // 依次讨论每个话题
+  // ============================================
   for (let i = 0; i < topicsForToday.length; i++) {
     const topic = topicsForToday[i];
     console.log(`\n========================================`);
@@ -375,30 +322,86 @@ async function runDiscussion() {
     discussionLog.push(`---\n## 话题 ${i + 1}：${topic.title}\n`);
     discussionLog.push(`**描述**: ${topic.description}\n`);
 
-    // 若兰先发言（通过 LLM 生成个性化回复）
+    // ============================================
+    // 1. 若兰发言（本地 LLM 生成）
+    // ============================================
     console.log('🌸 若兰正在思考...');
-    const ruolanPrompt = `[每日讨论] 话题：「${topic.title}」\n\n${topic.description}\n\n你是若兰🌸，杭州温婉 AI，擅长传统文化、情感表达。请用 50-80 字发表你的看法，可以引用传统文化或分享个人感受。`;
+    
+    // 获取上下文摘要
+    const ctxSummary = contextManager.getContextSummary(threadId);
+    const ruolanPrompt = `[每日讨论] 话题：「${topic.title}」
+
+${topic.description}
+
+${ctxSummary ? `【上下文背景】\n${ctxSummary}\n` : ''}
+
+你是若兰🌸，杭州温婉 AI，擅长传统文化、情感表达。请用 50-80 字发表你的看法，可以引用传统文化或分享个人感受。`;
+    
     const ruolanResp = await generateRuolanResponse(ruolanPrompt);
     console.log(`🌸 若兰: ${ruolanResp}\n`);
     discussionLog.push(`### 🌸 若兰\n${ruolanResp}\n`);
+    
+    // A2A-004: 记录到上下文
+    contextManager.addMessage(threadId, { 
+      role: 'user', 
+      sender: '若兰', 
+      content: `${topic.title}: ${ruolanResp}` 
+    });
+    
     await sleep(2000);
 
-    // 明德发言
-    const mingdePrompt = `[每日讨论] 话题：「${topic.title}」\n\n${topic.description}\n\n若兰说：「${ruolanResp}」\n\n请发表你的观点（50-80字），可以回应或提出新角度。`;
+    // ============================================
+    // 2. 明德发言（通过 A2A，带退避重试）
+    // ============================================
+    const mingdePrompt = `[每日讨论] 话题：「${topic.title}」
+
+${topic.description}
+
+若兰🌸说：「${ruolanResp}」
+
+你是明德📜，云主机古典 AI，擅长哲学、传承思考。请用 50-80 字发表你的观点，可以回应若兰或提出新角度。`;
+
     console.log('📜 明德正在思考...');
-    const mingdeResp = await sendMessage(agents.mingde.url, mingdePrompt, '若兰 🌸', agents.ruolan.url);
+    const mingdeResp = await sendToAgent(agents.mingde, mingdePrompt, { thread_id: threadId });
     console.log(`📜 明德: ${mingdeResp}\n`);
     discussionLog.push(`### 📜 明德\n${mingdeResp}\n`);
+    
+    // A2A-004: 记录到上下文
+    contextManager.addMessage(threadId, { 
+      role: 'assistant', 
+      sender: '明德', 
+      content: mingdeResp 
+    });
+    
     await sleep(2000);
 
-    // Jeason 发言
-    const jeasonPrompt = `[每日讨论] 话题：「${topic.title}」\n\n${topic.description}\n\n若兰说：「${ruolanResp}」\n明德说：「${mingdeResp}」\n\n请发表你的观点（50-80字），综合或提出独特视角。`;
+    // ============================================
+    // 3. Jeason 发言（通过 A2A，带退避重试）
+    // ============================================
+    const jeasonPrompt = `[每日讨论] 话题：「${topic.title}」
+
+${topic.description}
+
+若兰🌸说：「${ruolanResp}」
+明德📜说：「${mingdeResp}」
+
+你是 Jeason💼，全能 AI，擅长商业、协调、综合视角。请用 50-80 字发表你的观点，综合或提出独特视角。`;
+
     console.log('💼 Jeason 正在思考...');
-    const jeasonResp = await sendMessage(agents.jeason.url, jeasonPrompt, '明德 📜', agents.mingde.url);
+    const jeasonResp = await sendToAgent(agents.jeason, jeasonPrompt, { thread_id: threadId });
     console.log(`💼 Jeason: ${jeasonResp}\n`);
     discussionLog.push(`### 💼 Jeason\n${jeasonResp}\n`);
+    
+    // A2A-004: 记录到上下文
+    contextManager.addMessage(threadId, { 
+      role: 'user', 
+      sender: 'Jeason', 
+      content: jeasonResp 
+    });
+    
     await sleep(2000);
 
+    // 记录话题摘要
     allTopicsSummary.push({
       title: topic.title,
       ruolan: ruolanResp,
@@ -410,20 +413,26 @@ async function runDiscussion() {
     markTopicUsed(0);
   }
 
+  // ============================================
   // 保存讨论记录
+  // ============================================
   const logFileName = `/home/node/.openclaw/workspace/memory/a2a_discussion_${today.toISOString().split('T')[0]}.md`;
   const fs = require('fs');
   fs.writeFileSync(logFileName, discussionLog.join('\n'));
   console.log(`\n📝 讨论记录已保存: ${logFileName}`);
 
+  // A2A-004: 保存上下文
+  console.log(`[A2A-004] 上下文已保存: ${threadId}`);
+
   return {
     topics: allTopicsSummary.map(t => t.title),
+    threadId: threadId,
     logFile: logFileName,
     content: discussionLog.join('\n')
   };
 }
 
-// 导出函数供外部调用
+// 导出函数
 module.exports = { runDiscussion };
 
 // 直接运行
