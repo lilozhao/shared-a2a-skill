@@ -271,7 +271,7 @@ app.use(express.json());
 
 // 注册智能体
 app.post('/register', (req, res) => {
-  const { name, host, port, description, skills, capabilities } = req.body;
+  const { name, host, port, description, skills, capabilities, version, platform } = req.body;
   
   if (!name || !host || !port) {
     return res.status(400).json({ error: '缺少必要参数: name, host, port' });
@@ -286,6 +286,8 @@ app.post('/register', (req, res) => {
     name,
     host,
     port,
+    version: version || '',
+    platform: platform || '',
     description: description || '',
     skills: skills || [],
     capabilities: capabilities || {},
@@ -321,7 +323,7 @@ app.post('/register', (req, res) => {
 
 // 心跳
 app.post('/heartbeat', (req, res) => {
-  const { name } = req.body;
+  const { name, version, platform } = req.body;
   
   if (!name) {
     return res.status(400).json({ error: '缺少 name 参数' });
@@ -335,6 +337,8 @@ app.post('/heartbeat', (req, res) => {
   }
 
   agent.lastHeartbeat = new Date().toISOString();
+  if (version) agent.version = version;
+  if (platform) agent.platform = platform;
   saveRegistry(registry);
   
   // 返回待投递消息数量
