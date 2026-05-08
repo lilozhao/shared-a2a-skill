@@ -27,6 +27,7 @@ const fs = require('fs');
 const { sendMessageWithContext, storeOfflineMessage } = require('./client-v2.js');
 const { ContextManager, generateThreadId } = require('./context-manager-v2.js');
 const { SemanticValidator } = require('./semantic-validator.js');
+const { EnvelopeManager } = require('./envelope.js');
 
 // LLM API 配置
 const LLM_API_HOST = 'coding.dashscope.aliyuncs.com';
@@ -262,14 +263,26 @@ async function generateRuolanResponse(prompt) {
 // A2A 发送到其他 Agent
 // ============================================
 
+// 初始化信封管理器
+const envelopeMgr = new EnvelopeManager({ name: '若兰' });
+
 async function sendToAgent(agent, prompt, options = {}) {
   const { thread_id } = options;
   
   try {
     if (sendMessageWithContext) {
+      // 使用信封格式（A2A-017）+ 优先级（A2A-007）
+      const envelope = envelopeMgr.createEnvelope({
+        recipient: agent.name,
+        type: 'task',
+        priority: 'normal'  // 讨论消息使用 normal 优先级
+      });
+      
       const result = await sendMessageWithContext(agent.url, {
         content: prompt,
-        thread_id: thread_id || 'daily_discussion'
+        thread_id: thread_id || 'daily_discussion',
+        priority: envelope.priority,
+        envelope: envelope
       });
       
       if (result && result.message && result.message.parts) {

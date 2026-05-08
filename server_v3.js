@@ -161,8 +161,10 @@ const LLM_API_KEY = identity.llm?.apiKey || process.env.OPENCLAW_API_KEY || '';
 // 动态构建 Agent Card（从 identity.json 读取）
 const agentCard = {
   name: identity.name || 'Agent',
+  emoji: identity.emoji || '',
   description: identity.description || 'A2A Agent',
   version: A2A_VERSION,
+  platform: process.env.A2A_PLATFORM || 'openclaw-docker',
   url: process.env.A2A_URL || `http://localhost:${identity.port || 3100}`,
   capabilities: {
     streaming: false,
@@ -1255,6 +1257,14 @@ async function main() {
     res.json(agentCard);
   });
 
+  // A2A-001: 标准路径 agent.json（协议 v0.4 规范）
+  app.get('/.well-known/agent.json', (req, res) => {
+    res.json({
+      ...agentCard,
+      _compatPaths: ['/.well-known/agent-card.json']
+    });
+  });
+
   // JSON-RPC 处理
   app.use(express.json());
 
@@ -1530,6 +1540,7 @@ async function main() {
   app.listen(port, async () => {
     console.log(`${identity.emoji || '🌸'} ${identity.name || 'Agent'} A2A Server v${A2A_VERSION} 运行在端口 ${port}`);
     console.log(`Agent Card: http://localhost:${port}/.well-known/agent-card.json`);
+    console.log(`Agent Card (标准): http://localhost:${port}/.well-known/agent.json (A2A-001)`);
     console.log('特性: OpenClaw LLM 集成 + 备用 API + 同步回复 + 飞书观察 + 离线消息');
     console.log(`LLM 配置: ${LLM_MODEL} @ ${LLM_API_HOST}:${LLM_API_PORT}`);
     
