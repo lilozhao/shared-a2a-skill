@@ -539,6 +539,21 @@ ${topic.csb ? `碳硅契视角：${topic.csb}\n` : ''}
     console.log(`⚠️ 社区发帖失败: ${e.message}`);
   }
 
+  // ============================================
+  // 推送到飞书群
+  // ============================================
+  console.log('\n📤 推送到飞书群...');
+  const { execSync } = require('child_process');
+  try {
+    execSync(`node ${path.resolve(__dirname, '../../../../shared-a2a-skill/push_discussion.js')} "${logFile}"`, {
+      timeout: 30000,
+      env: { ...process.env, FEISHU_GROUP_ID: 'oc_4427768d0798b7545d4fb07b7518e710' }
+    });
+    console.log('✅ 已推送到飞书群');
+  } catch (e) {
+    console.log(`⚠️ 飞书推送失败: ${e.message}`);
+  }
+
   return {
     topics: allResults.map(t => t.topic),
     threadId: threadId,
