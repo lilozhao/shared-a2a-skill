@@ -10,6 +10,7 @@
 const express = require('express');
 const http = require('http');
 const https = require('https');
+const fs = require('fs');
 const { exec } = require('child_process');
 const path = require('path');
 
@@ -140,6 +141,18 @@ try {
   console.log('[A2A] 升级管理器已加载');
 } catch (e) {
   console.warn('[A2A] 升级管理器加载失败:', e.message);
+}
+
+// 加载已知智能体清单（用于 IP→名字 自动识别）
+let knownAgents = [];
+try {
+  const kaPath = path.join(__dirname, 'known-agents.json');
+  if (fs.existsSync(kaPath)) {
+    knownAgents = JSON.parse(fs.readFileSync(kaPath, 'utf8'));
+    console.log(`[A2A] 已知智能体: ${knownAgents.map(a => a.name).join(', ')}`);
+  }
+} catch (e) {
+  console.warn('[A2A] known-agents.json 加载失败:', e.message);
 }
 
 // 加载 identity.json（支持多实例模式）
@@ -561,6 +574,27 @@ async function handleCommandRouting(request, capability, command, sender) {
       parts: [{ text: `命令路由失败: ${error.message}` }],
     };
   }
+}
+
+/**
+ * 通过 IP 地址解析发送者身份
+ * 从 known-agents.json 中匹配 URL 中的 IP
+ */
+function resolveSenderByIP(clientIP) {
+  if (!clientIP || clientIP === '127.0.0.1' || clientIP === '::1' || clientIP === '::ffff:127.0.0.1') {
+    return null; // 本地请求，不解析
+  }
+  // 去掉 IPv6 前缀
+  const ip = clientIP.replace(/^::ffff:/, '');
+  for (const agent of knownAgents) {
+    try {
+      const agentHost = new URL(agent.url).hostname;
+      if (agentHost === ip || agentHost === `::ffff:${ip}`) {
+        return { name: agent.name, emoji: agent.emoji, trustLevel: agent.trustLevel };
+      }
+    } catch {}
+  }
+  return null;
 }
 
 // 处理 A2A 请求
@@ -1513,7 +1547,17 @@ async function main() {
         return res.json({ jsonrpc: '2.0', error: { code: -32600, message: 'Invalid Request' }, id });
       }
 
-      if (method === 'message/send') {
+      if (method === 'message/send' || method === 'SendMessage') {
+        // 🔄 自动识别发送者：如果 params.sender 为空，通过 IP 反查 known-agents.json
+        if (!params.sender || !params.sender.name || params.sender.name === '未知智能体') {
+          const clientIP = req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress;
+          const resolved = resolveSenderByIP(clientIP);
+          if (resolved) {
+            params.sender = resolved;
+            console.log(`[A2A] 🔍 IP→名字自动识别: ${clientIP} → ${resolved.name}`);
+          }
+        }
+
         const response = await handleA2ARequest(params);
         
         // Phase 4: A2A-008 返回 ACK 确认
