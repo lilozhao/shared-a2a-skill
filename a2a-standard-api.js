@@ -1,10 +1,12 @@
 /**
- * A2A 标准 JSON-RPC API 模块 v1.1
- * Code Review 修复: SSE心跳、版本检查增强、IP提取优化、REJECTED时间戳
+ * A2A 标准 JSON-RPC API 模块 v1.2
+ * + LLM 智能回复 (从 v3 移植)
  *
- * 版本: 1.1.0 | 2026-05-10
+ * 版本: 1.2.0 | 2026-05-10
  */
 
+const http = require('http');
+const https = require('https');
 const { TaskStore, TASK_STATE, ROLE, createMessage, createArtifact, createPart, TERMINAL_STATES } = require('./a2a-task-store.js');
 
 // ============================================
@@ -144,9 +146,15 @@ class A2AStandardAPI {
       }
     }
 
+    // 将 sender 信息存入 metadata，供 LLM 回复使用
+    const taskMetadata = {
+      ...(params.configuration?.metadata || {}),
+      ...(params.sender ? { sender: params.sender } : {}),
+    };
+
     const task = this.taskStore.createTask({
       contextId: msg.contextId || undefined,
-      metadata: params.configuration?.metadata,
+      metadata: Object.keys(taskMetadata).length > 0 ? taskMetadata : undefined,
     });
 
     this.taskStore.addHistory(task.id, { role: msg.role, parts: msg.parts, messageId: msg.messageId || `msg_${Date.now()}` });
@@ -157,7 +165,7 @@ class A2AStandardAPI {
     // 实际处理 (外部注入或桩)
     this.taskStore.updateTaskStatus(task.id, TASK_STATE.WORKING, 'Processing');
     try {
-      const response = await this._processTask(task.id, msg);
+      const response = await this._processTask(task.id, msg, taskMetadata);
 
       if (response?.artifacts) {
         for (const art of response.artifacts) this.taskStore.addArtifact(task.id, art);
@@ -290,13 +298,13 @@ class A2AStandardAPI {
     const msg = req.body.message;
     if (!msg) { res.write(`event: error\ndata: ${JSON.stringify({ error: 'Missing message' })}\n\n`); return res.end(); }
 
-    const task = this.taskStore.createTask({ contextId: msg.contextId });
+    const task = this.taskStore.createTask({ contextId: msg.contextId, metadata: { sender: req.body.sender } });
     this.taskStore.addHistory(task.id, { role: msg.role, parts: msg.parts, messageId: msg.messageId || `msg_${Date.now()}` });
     this.taskStore.updateTaskStatus(task.id, TASK_STATE.WORKING);
     res.write(`data: ${JSON.stringify({ task: this.taskStore.getTask(task.id) })}\n\n`);
 
     try {
-      const resp = await this._processTask(task.id, msg);
+      const resp = await this._processTask(task.id, msg, { sender: req.body.sender });
       if (resp?.artifacts) {
         for (const art of resp.artifacts) {
           this.taskStore.addArtifact(task.id, art);
@@ -316,13 +324,101 @@ class A2AStandardAPI {
 
   // ================= 辅助 =================
 
-  async _processTask(taskId, msg) {
+  async _processTask(taskId, msg, metadata) {
     if (this._externalHandler) return this._externalHandler(taskId, msg);
-    const text = msg.parts.filter(p => p.text).map(p => p.text).join(' ');
+
+    let text = msg.parts.filter(p => p.text).map(p => p.text).join(' ');
+    if (!text || text.trim().length < 2) text = '(empty)';
+
+    // 🔥 尝试 LLM 智能回复 (非空消息)
+    const llmResponse = await this._callLLM(text, metadata);
+
+    if (llmResponse) {
+      console.log(`[A2A] 🤖 LLM 回复 task ${taskId}: ${llmResponse.substring(0, 60)}...`);
+      return {
+        artifacts: [createArtifact([createPart(llmResponse)], { name: 'response' })],
+        message: createMessage(ROLE.AGENT, [createPart(llmResponse)]),
+      };
+    }
+
+    // 降级: 回声模式
+    console.log(`[A2A] ⚠️ LLM 不可用，使用回声回复 task ${taskId}`);
     return {
-      artifacts: [createArtifact([createPart(`Received: ${text || '(empty)'}`)], { name: 'response' })],
+      artifacts: [createArtifact([createPart(`Received: ${text}`)], { name: 'response' })],
       message: createMessage(ROLE.AGENT, [createPart(`Processed message for task ${taskId}`)]),
     };
+  }
+
+  // ================= LLM 智能回复 =================
+
+  /**
+   * 调用 LLM 生成智能回复 (从 v3 server_v3.js 移植)
+   */
+  async _callLLM(messageText, metadata) {
+    const llmConfig = this.identity?.llm;
+    if (!llmConfig?.host || !llmConfig?.apiKey) {
+      console.log('[A2A] LLM 未配置 (host/apiKey)');
+      return null;
+    }
+
+    // 提取发送者名称 (优先从 metadata)
+    const senderName = metadata?.sender?.name ||
+      metadata?.sender ||
+      (typeof metadata?.sender === 'string' ? metadata.sender : null) ||
+      '未知智能体';
+
+    // 生成系统提示
+    const systemPrompt = this.identity.systemPrompt ||
+      `你是${this.identity.name || 'Agent'}，${this.identity.description || '一个 AI 伙伴'}。
+性格: ${this.identity.personality || '友善、好奇'}。
+请用自然、有个性的方式回复，50-120字内。用${this.identity.emoji || '🤖'}表情。`;
+
+    const payload = JSON.stringify({
+      model: llmConfig.model || 'astron-code-latest',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `[来自 ${senderName} 的消息]
+${messageText}` }
+      ],
+      max_tokens: 300,
+      temperature: 0.7,
+    });
+
+    return new Promise((resolve) => {
+      const transport = String(llmConfig.port) === '443' ? https : http;
+      const req = transport.request({
+        hostname: llmConfig.host,
+        port: parseInt(llmConfig.port) || 443,
+        path: llmConfig.path || '/v1/chat/completions',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${llmConfig.apiKey}`,
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      }, res => {
+        let body = '';
+        res.on('data', c => body += c);
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(body);
+            const content = data.choices?.[0]?.message?.content?.trim();
+            if (content) { resolve(content); return; }
+            // OpenClaw 自定义格式
+            const alt = data.response || data.text || data.content;
+            if (alt) { resolve(alt.trim()); return; }
+            console.error('[A2A] LLM 返回格式异常:', body.substring(0, 150));
+            resolve(null);
+          } catch (e) {
+            console.error('[A2A] LLM 解析失败:', e.message);
+            resolve(null);
+          }
+        });
+      });
+      req.on('error', e => { console.error('[A2A] LLM 连接失败:', e.message); resolve(null); });
+      req.setTimeout(15000, () => { req.destroy(); console.error('[A2A] LLM 超时'); resolve(null); });
+      req.write(payload); req.end();
+    });
   }
 
   _clientIp(req) {
