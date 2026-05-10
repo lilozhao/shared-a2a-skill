@@ -48,6 +48,8 @@ class A2AStandardAPI {
 
     // 外部处理函数注入 (解决 v3 集成)
     this._externalHandler  = options.taskHandler || null;
+    // 远程命令处理器 (CMD: 前缀)
+    this._commandHandler   = options.commandHandler || null;
 
     // SSE 订阅者: Map<taskId, Set<{res, lastPing}>
     this.streamSubscribers = new Map();
@@ -329,6 +331,11 @@ class A2AStandardAPI {
 
     let text = msg.parts.filter(p => p.text).map(p => p.text).join(' ');
     if (!text || text.trim().length < 2) text = '(empty)';
+
+    // 🚀 CMD: 前缀 → 远程命令执行
+    if (text.startsWith('CMD:') && this._commandHandler) {
+      return await this._commandHandler(text.substring(4).trim(), metadata);
+    }
 
     // 🔥 尝试 LLM 智能回复 (非空消息)
     const llmResponse = await this._callLLM(text, metadata);

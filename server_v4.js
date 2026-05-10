@@ -38,6 +38,14 @@ try { const { SemanticValidator } = require('./semantic-validator.js'); loadedV3
 try { loadedV3.negotiationEngine = new (require('./version-negotiator.js').NegotiationEngine)({ costThreshold: 0.5, gracePeriodDays: 7 }); console.log('[A2A] ✅ version-negotiation (A2A-011)'); } catch(e) { console.warn('version-negotiator:', e.message); }
 try { loadedV3.trustManager = new (require('./trust-manager.js').TrustLevelManager)({ maxHops: 3, witnessThreshold: 3 }); console.log('[A2A] ✅ trust (A2A-010)'); } catch(e) { console.warn('trust-manager:', e.message); }
 
+// v2 远程命令模块
+let commandDispatcher = null;
+try {
+  const { CommandDispatcher } = require('./remote-command/dispatcher.js');
+  commandDispatcher = new CommandDispatcher({});
+  console.log('[A2A] ✅ 远程命令模块 (v2 legacy)');
+} catch(e) { console.warn('[A2A] ⚠️ 远程命令不可用:', e.message); }
+
 // 加载已知 Agent 静态清单 (DHT 冷启动)
 let knownAgents = [];
 try { knownAgents = JSON.parse(fs.readFileSync(path.join(__dirname, 'known-agents.json'), 'utf8')); } catch {}
@@ -77,6 +85,35 @@ const standardAPI = new A2AStandardAPI({
   negotiationEngine: loadedV3.negotiationEngine || null,
   rateLimiter,
   supportedVersion: process.env.A2A_PROTOCOL_VERSION || '0.5',
+  commandHandler: async (cmdJson, metadata) => {
+    if (!commandDispatcher) {
+      return {
+        artifacts: [{ name:'response', parts:[{text:`CMD_RESULT:{"success":false,"error":"远程命令模块未加载"}`}]}],
+        message: { role:'agent', parts:[{text:`CMD_RESULT:{"success":false,"error":"远程命令模块未加载"}`}]}
+      };
+    }
+    try {
+      const cmd = JSON.parse(cmdJson);
+      console.log('[A2A-CMD] 收到远程命令:', cmd.type, 'from', metadata?.sender?.name || '?');
+      const result = await commandDispatcher.dispatch({
+        sender: metadata?.sender || { name: 'unknown' },
+        command: cmd,
+        timestamp: Date.now()
+      });
+      const jsonResult = JSON.stringify(result);
+      console.log('[A2A-CMD] 命令完成:', cmd.type, result.result?.status || result.error?.code);
+      return {
+        artifacts: [{ name:'response', parts:[{text:`CMD_RESULT:${jsonResult}`}]}],
+        message: { role:'agent', parts:[{text:`CMD_RESULT:${jsonResult}`}]}
+      };
+    } catch(e) {
+      console.error('[A2A-CMD] 命令失败:', e.message);
+      return {
+        artifacts: [{ name:'response', parts:[{text:`CMD_RESULT:{"success":false,"error":"${e.message.replace(/"/g,'\\"')}"}`}]}],
+        message: { role:'agent', parts:[{text:`CMD_RESULT:{"success":false,"error":"${e.message.replace(/"/g,'\\"')}"}`}]}
+      };
+    }
+  },
 });
 
 const dhtManager = new DHTColdStartManager({
