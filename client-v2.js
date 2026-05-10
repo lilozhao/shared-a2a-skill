@@ -568,6 +568,42 @@ async function main() {
   }
 }
 
+// ==================== 远程命令 ====================
+
+/**
+ * 发送远程命令到 Agent (CMD: 前缀)
+ * @param {string} agentUrl - 目标 Agent URL
+ * @param {string} commandType - 命令类型，如 'system.status', 'agent.health'
+ * @param {Object} params - 命令参数
+ * @param {Object} context - 上下文 (thread_id, parent_id 等)
+ * @returns {Promise<Object>} 命令执行结果
+ */
+async function sendCommand(agentUrl, commandType, params = {}, context = {}) {
+  const cmd = { type: commandType, target: 'self', params };
+  const cmdStr = JSON.stringify(cmd);
+  const messageText = `CMD:${cmdStr}`;
+  
+  const result = await sendMessageWithContext(agentUrl, messageText, context);
+  const responseText = result?.message?.parts?.map(p => p.text).join('') || '';
+  
+  if (responseText.startsWith('CMD_RESULT:')) {
+    try {
+      const cmdResult = JSON.parse(responseText.substring(11));
+      return {
+        ok: !cmdResult.error,
+        result: cmdResult.result,
+        error: cmdResult.error,
+        raw: cmdResult,
+      };
+    } catch (e) {
+      return { ok: false, error: '解析命令结果失败', raw: responseText };
+    }
+  }
+  
+  // 不是 CMD_RESULT 格式 = 走了 LLM 回复（目标没装命令模块）
+  return { ok: false, error: '目标Agent未启用命令模块', raw: responseText };
+}
+
 // 导出模块
 module.exports = {
   // 核心功能
@@ -581,6 +617,8 @@ module.exports = {
   sendAck,
   // A2A-015 退避策略
   calculateBackoff,
+  // 远程命令 (CMD: 前缀)
+  sendCommand,
   // 版本兼容性检查
   getAgentInfo,
   checkCompatibility,
