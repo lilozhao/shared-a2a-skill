@@ -281,7 +281,17 @@ async function sendMessage(agentUrl, params) {
           if (response.error) {
             reject(new Error(response.error.message || '未知错误'));
           } else {
-            resolve(response.result);
+            // 🔄 v3/v4 响应格式兼容：统一为 { message: { parts: [...] } }
+            const result = response.result;
+            if (result && !result.message && result.task && result.task.artifacts) {
+              // v4 格式：result.task.artifacts[0].parts → 转为 v3 格式
+              const lastArtifact = result.task.artifacts[result.task.artifacts.length - 1];
+              result.message = {
+                role: 'agent',
+                parts: lastArtifact?.parts || [{ text: result.task.status?.message || 'Completed' }],
+              };
+            }
+            resolve(result);
           }
         } catch (e) {
           reject(new Error('解析响应失败: ' + e.message));
