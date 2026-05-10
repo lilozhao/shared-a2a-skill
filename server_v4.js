@@ -12,7 +12,7 @@
  *   ✅ A2A-021 端到端加密 (AES-256-GCM + HKDF)
  *   ✅ A2A-026 DHT 冷启动降级
  *
- * 版本: 4.1.0 | 2026-05-10
+ * 版本: 4.1.0 (A2A v0.6) | 2026-05-10
  */
 
 const express = require('express');
@@ -84,7 +84,7 @@ const standardAPI = new A2AStandardAPI({
   semanticValidator: loadedV3.semanticValidator || null,
   negotiationEngine: loadedV3.negotiationEngine || null,
   rateLimiter,
-  supportedVersion: process.env.A2A_PROTOCOL_VERSION || '0.5',
+  supportedVersion: process.env.A2A_PROTOCOL_VERSION || '0.6',
   commandHandler: async (cmdJson, metadata) => {
     if (!commandDispatcher) {
       return {
@@ -161,7 +161,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     version: A2A_VERSION,
-    protocol: 'A2A v0.5',
+    protocol: 'A2A v0.6',
     identity: identity.name,
     uptime: Math.floor(process.uptime()),
     dht: dhtManager.getStatus(),
@@ -199,7 +199,7 @@ app.get('/.well-known/agent.json', (req, res) => {
     emoji: identity.emoji || '🤖',
     description: identity.description || '',
     version: A2A_VERSION,
-    protocolVersion: '0.5',
+    protocolVersion: '0.6',
     endpoints: {
       jsonrpc: `http://localhost:${port}/a2a/json-rpc`,
       rest: { sendMessage: `http://localhost:${port}/message:send`, getTask: `http://localhost:${port}/tasks/`, listTasks: `http://localhost:${port}/tasks`, cancel: `http://localhost:${port}/tasks/:id/cancel`, stream: `http://localhost:${port}/a2a/stream/:id` },
@@ -217,7 +217,7 @@ app.get('/.well-known/agent-card.json', (req, res) => {
 // ===== 启动 =====
 console.log(`\n${'─'.repeat(55)}`);
 console.log(`  ${identity.emoji || '🌸'} ${identity.name} A2A Server v${A2A_VERSION}`);
-console.log(`  📡 端口:${port}  协议:A2A v0.5(26条)  DHT:待启动`);
+console.log(`  📡 端口:${port}  协议:A2A v0.6(27条+Google v1.0.0)  DHT:待启动`);
 console.log(`  📋 JSON-RPC  │ REST  │ SSE  │ E2E(${e2eManager.enabled ? '✅' : '⚠️ '})`);
 console.log(`${'─'.repeat(55)}`);
 
