@@ -276,7 +276,7 @@ async function main() {
   summary.push([{ tag:'text', text:'' }]);
   for (const r of allResults) {
     summary.push([{ tag:'text', text:`📌 ${r.topic}` }]);
-    const okCount = ['axuan','jeason','mingde'].filter(k => round[k]?.ok).length;
+    const okCount = ['axuan','jeason','mingde'].filter(k => r[k]?.ok).length;
     summary.push([{ tag:'text', text:`  🌸 若兰 ✅ | ${okCount+1}/4 在线回应` }]);
   }
   await pushToFeishu('📊 讨论结束', summary);
