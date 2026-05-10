@@ -97,8 +97,18 @@ class A2AStandardAPI {
         }
       }
 
+      // 🔄 向下兼容旧版方法名（v3 client → v4 server）
+      const METHOD_ALIASES = {
+        'message/send': 'SendMessage',
+        'tasks/send':   'SendMessage',
+        'tasks/get':    'GetTask',
+        'tasks/list':   'ListTasks',
+        'tasks/cancel': 'CancelTask',
+      };
+      const normalizedMethod = METHOD_ALIASES[method] || method;
+
       let result;
-      switch (method) {
+      switch (normalizedMethod) {
         case 'SendMessage':          result = await this._sendMessage(params); break;
         case 'SendStreamingMessage': result = await this._sendMessage(params); break; // 非流式回退
         case 'GetTask':              result = this._getTask(params);            break;
